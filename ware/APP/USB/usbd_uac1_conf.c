@@ -307,6 +307,16 @@ void usbd_audiov1_open(uint8_t busid, uint8_t intf)
 	uac1_dma_buf1 = malloc_bsc(AUDIO_OUT_PACKET);
 	uac1_usb_buf = malloc_bsc(AUDIO_OUT_PACKET);
 
+	// 任一缓冲申请失败就直接放弃本次 open: 否则下面的 memset 会解引用空指针
+	if (!uac1_audio_ring_buf || !uac1_dma_buf0 || !uac1_dma_buf1 || !uac1_usb_buf) {
+		if (uac1_audio_ring_buf) { free_bsc(uac1_audio_ring_buf); uac1_audio_ring_buf = NULL; }
+		if (uac1_dma_buf0) { free_bsc(uac1_dma_buf0); uac1_dma_buf0 = NULL; }
+		if (uac1_dma_buf1) { free_bsc(uac1_dma_buf1); uac1_dma_buf1 = NULL; }
+		if (uac1_usb_buf) { free_bsc(uac1_usb_buf); uac1_usb_buf = NULL; }
+		rx_flag = 0;
+		return;
+	}
+
     memset(uac1_audio_ring_buf, 0, AUDIO_BUF_NUM * AUDIO_OUT_PACKET);
     memset(uac1_dma_buf0, 0, AUDIO_OUT_PACKET);
     memset(uac1_dma_buf1, 0, AUDIO_OUT_PACKET);

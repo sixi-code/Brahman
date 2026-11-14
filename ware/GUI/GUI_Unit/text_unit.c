@@ -286,14 +286,23 @@ static void load_page(uint32_t target_offset)
 
             uint32_t letter_idx = lv_label_get_letter_on(ts->text_label, &p);
 
+            /* 步进必须夹在缓冲范围内:
+             * 原写法按 UTF-8 首字节直接 +2/+3/+4, 遇到被截断的多字节序列
+             * (跨块边界残留/编码错误)时 byte_idx 会冲出 valid_len,
+             * 下一行的 text_buf[byte_idx]='\0' 就写到 1024B 缓冲之外,
+             * 踩坏 BSC 相邻块; lv_label_set_text_static 还会拿到越界指针。
+             * 限制到 buf_size-1: 截断的多字节字符最多显示成乱码, 不会越界。 */
+            uint32_t limit = (ts->decoder.buf_size > 0) ? (ts->decoder.buf_size - 1) : 0;
             uint32_t byte_idx = 0;
-            for (uint32_t i = 0; i <= letter_idx && ts->decoder.text_buf[byte_idx] != '\0'; i++) {
+            for (uint32_t i = 0; i <= letter_idx; i++) {
+                if (byte_idx >= limit) break;
                 uint8_t c = (uint8_t)ts->decoder.text_buf[byte_idx];
-                if ((c & 0x80) == 0)      byte_idx += 1;
-                else if ((c & 0xE0) == 0xC0) byte_idx += 2;
-                else if ((c & 0xF0) == 0xE0) byte_idx += 3;
-                else if ((c & 0xF8) == 0xF0) byte_idx += 4;
-                else byte_idx += 1;
+                if (c == '\0') break;
+                uint32_t step = ((c & 0x80) == 0)         ? 1 :
+                                ((c & 0xE0) == 0xC0)      ? 2 :
+                                ((c & 0xF0) == 0xE0)      ? 3 :
+                                ((c & 0xF8) == 0xF0)      ? 4 : 1;
+                byte_idx = (byte_idx + step > limit) ? limit : (byte_idx + step);
             }
 
             ts->decoder.text_buf[byte_idx] = '\0';

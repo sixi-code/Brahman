@@ -34,13 +34,15 @@ static uint8_t last_brightness = 0;// 记录上一次的屏幕亮度值
 void Basic_Task( void * pvParameters )
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    static uint8_t count100ms = 0;// 100ms计数器
+    static uint8_t count_tick = 0;// 20ms 节拍计数器(5 拍=100ms, 25 拍=500ms)
 	
-    //IWTG_Init();
-	
+    IWTG_Init();   // 独立看门狗: LSI 32kHz/128 分频, 重装 938 -> 约 3.7s 超时
+                   // 必须放在调度器已启动的任务里, 才能在死循环时真正复位
+                   // 注意: 长时间阻塞的循环(字库擦写/文件复制)必须自行喂狗
+
     while(1) 
     {
-		//IWDG_Feed();
+		IWDG_Feed();
 		
 		//adc读取
 		//电量计算
@@ -67,7 +69,11 @@ void Basic_Task( void * pvParameters )
 		}
 		if(g_TFcard_inited && !g_TFcard_status)// TF卡拔出则卸载文件系统
 		{
-			if(!SD_Deinit()) fatfs_unmount(DEV_SD);// TF卡卸载成功后卸载文件系统
+			/* 顺序很重要: 先摘卷(此后不会再有新的 f_* 打开文件), 再关硬件。
+			   若先 SD_Deinit 后 fatfs_unmount, 窗口期内仍有任务在按 fs 指针读写,
+			   而 SD_Deinit 已经把外设关了 → 介质消失 + 野指针。 */
+			fatfs_unmount(DEV_SD);
+			SD_Deinit();
 		}
 
 		//pwm ctrl
@@ -127,15 +133,26 @@ void Basic_Task( void * pvParameters )
 			//进入休眠模式 TODO
 		}
 		last_M = g_key_WKP_RT;
-		// 每500ms更新一次时钟
-        if(++count100ms > 4)
-        {
-            count100ms = 0;
-            RTC_Clock_Update();
-        }
+		/* 每 500ms 更新一次时钟。
+		 * 原写法 if(++count100ms > 4) 实际是 20ms x 5 = 100ms, 与注释不符,
+		 * 且把"节拍计数"当成"500ms 计数器"用, 后续想加 100ms 分频时没有依据。
+		 * 改成 count_tick 做 20ms 节拍, 5 个节拍 = 100ms, 25 个 = 500ms。 */
+		count_tick++;
+		if (count_tick >= 25)
+		{
+			count_tick = 0;
+			RTC_Clock_Update();
+		}
 
-        tsdb_log_flush();// 将日志缓冲区中的数据写入存储设备
-        kvdb_persist_flush();// 将所有已修改的持久化条目写入kvdb
+		/* Flash 刷写从"每 20ms"降到"每 100ms"。
+		 * 这两次调用都要拿 xFlashMutex, 最坏会触发扇区擦除(几十~数百 ms);
+		 * 20ms 一次等于让 Flash 子系统长期占住, 音频/UI 任务被牵连,
+		 * vTaskDelayUntil 也会因超时失去节拍意义。 */
+		if ((count_tick % 5) == 0)
+		{
+			tsdb_log_flush();// 将日志缓冲区中的数据写入存储设备
+			kvdb_persist_flush();// 将所有已修改的持久化条目写入kvdb
+		}
 
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(20));
     }

@@ -15,4 +15,7 @@ void chosen_file_path_free(void);
 int do_copy(const char* src, const char* dst);
 int do_delete(const char* path);
 
+// 后台操作收尾时回收进度结构体 (FileOp_Task 在 g_file_op_busy=0 之后调用)
+void file_op_progress_reclaim(void);
+
 #endif

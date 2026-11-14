@@ -82,7 +82,16 @@ DRESULT disk_write (BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
 	{
 		case SD_CARD:
 			res = SD_WriteDisk((uint8_t*)buff, sector, count);
-			while(res) { SD_Init(); res = SD_WriteDisk((uint8_t*)buff, sector, count); }
+			if(res) {
+				/* 不能无上限 while(res){SD_Init(); ...}:
+				   卡拔出/坏块时会把调用任务永久占死, 而且 SD_Init 在锁外重建互斥量,
+				   会和别的任务手里那把锁打架。改为"锁内只重试一次", 失败如实上报,
+				   由 f_write 返回 FR_DISK_ERR 让上层走错误处理。 */
+				sdcard_lock_external();
+				if(!SD_Init())
+					res = SD_WriteDisk((uint8_t*)buff, sector, count);
+				sdcard_unlock_external();
+			}
 			break;
 		case USB_DISK1: res = USB_disk_write(0, buff, sector, count); break;
 		case USB_DISK2: res = USB_disk_write(1, buff, sector, count); break;

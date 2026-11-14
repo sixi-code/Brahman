@@ -80,7 +80,7 @@ static void play_click_cb(lv_event_t * e)
     if (!album_state || album_state->item_cnt == 0) return;
 
     // 选中文件的完整路径交给媒体任务(与文件浏览器同一套交接方式)
-    if (chosen_file_path == NULL) chosen_file_path = malloc_bsc(256);
+    if (chosen_file_path == NULL) chosen_file_path = malloc_bsc(FILE_PATH_MAX);
     if (chosen_file_path == NULL) return;
 
     strncpy(chosen_file_path, album_state->img_paths[album_state->current_idx], 255);
@@ -124,6 +124,10 @@ void Create_Album_Unit(void)
     album_state->item_cnt = 0;
     album_state->current_idx = 0;
     album_state->img_paths = malloc_bsc(sizeof(char*) * album_state->item_cap);
+    if (album_state->img_paths == NULL) {       // 连路径数组都申请不到, 直接放弃本页
+        album_state->item_cap = 0;
+        return;
+    }
 
     // 遍历 SD 卡获取所有受支持的媒体文件路径
     DIR dir;
@@ -138,11 +142,13 @@ void Create_Album_Unit(void)
             if (album_ext_supported(fno.fname)) {
                 // 扩容判断
                 if (album_state->item_cnt >= album_state->item_cap) {
-                    album_state->item_cap *= 2;
-                    char ** new_paths = malloc_bsc(sizeof(char*) * album_state->item_cap);
+                    uint16_t new_cap = album_state->item_cap * 2;
+                    char ** new_paths = malloc_bsc(sizeof(char*) * new_cap);
+                    if (new_paths == NULL) break;   // 扩容失败: 结束扫描, 不能 memcpy 空指针
                     memcpy(new_paths, album_state->img_paths, sizeof(char*) * album_state->item_cnt);
                     free_bsc(album_state->img_paths);
                     album_state->img_paths = new_paths;
+                    album_state->item_cap  = new_cap;
                 }
 
                 char * full_path = malloc_bsc(128); 

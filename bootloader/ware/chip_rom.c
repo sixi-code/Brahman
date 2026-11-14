@@ -1,8 +1,9 @@
 #include "stm32f4xx.h"
 #include <stddef.h>
+#include "bootuf2_config.h"   // CONFIG_BOOTUF2_FLASHMAX (APP 区上界)
 
 //Bootloader 占 64KB 
-#define APP_START_ADDRESS 0x08010000
+#define APP_START_ADDRESS CONFIG_BOOTUF2_APP_START   // 与 UF2 地址校验共用同一个定义
 
 static uint16_t erased_sectors_bitmap = 0;
 
@@ -61,6 +62,15 @@ int bootuf2_flash_write(uint32_t address, const uint8_t *data, size_t size)
 {
     if (address < APP_START_ADDRESS) {
         return -1; // 拒绝写入 Bootloader 区域
+    }
+    /* 上界同样要挡: APP 区是 0x08010000 ~ 0x080FFFFF (960KB)。
+     * 越界地址会被 GetSector() 归到 Sector_11 并"成功"擦除 —— 也就是说
+     * 一次越界写能顺手把别人刚烧好的扇区擦掉。 */
+    if (address + size > (APP_START_ADDRESS + CONFIG_BOOTUF2_FLASHMAX)) {
+        return -1;
+    }
+    if ((size & 3u) != 0) {
+        return -1; // 按字编程, 长度必须是 4 的倍数
     }
 
     uint32_t current_sector = GetSector(address);

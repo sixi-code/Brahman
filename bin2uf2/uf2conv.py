@@ -16,8 +16,10 @@ UF2_MAGIC_END    = 0x0AB16F30 # Ditto
 
 INFO_FILE = "/INFO_UF2.TXT"
 
-appstartaddr = 0x2000
-familyid = 0x0
+# 必须与本工程一致: APP 从 0x08010000 起, familyID = 0x57755a57。
+# 基址不对时 Bootloader 会静默丢弃所有块。
+appstartaddr = 0x08010000
+familyid = 0x57755a57
 
 
 def is_uf2(buf):
@@ -284,12 +286,14 @@ if len(sys.argv) == 1:
     parser = argparse.ArgumentParser(description='Convert to UF2 or flash directly.')
     parser.add_argument('input', metavar='INPUT', type=str, nargs='?',
                         help='input file (HEX, BIN or UF2)')
+    # 默认基址 = 本工程 APP 起始地址。基址不符时 Bootloader 只接受落在
+    # 0x08010000 以后的块, 其余静默丢弃。
     parser.add_argument('-b', '--base', dest='base', type=str,
-                        default="0x2000",
-                        help='set base address of application for BIN format (default: 0x2000)')
+                        default="0x08010000",
+                        help='set base address of application for BIN format (default: 0x08010000)')
     parser.add_argument('-f', '--family', dest='family', type=str,
-                        default="0x0",
-                        help='specify familyID - number or name (default: 0x0)')
+                        default="0x57755a57",   # 本工程 CONFIG_BOOTUF2_FAMILYID
+                        help='specify familyID - number or name (default: 0x57755a57)')
     parser.add_argument('-o', '--output', metavar="FILE", dest='output', type=str,
                         help='write output to named file; defaults to "flash.uf2" or "flash.bin" where sensible')
     parser.add_argument('-d', '--device', dest="device_path",

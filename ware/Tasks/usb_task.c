@@ -98,7 +98,9 @@ void USB_Task( void * pvParameters )
 					case USBH_CDC:  		usbh_serial_deinit(); 					break;
 					default: break;
 				}
-				Delay_ms(300);
+				/* 分片等待: 一次性 Delay_ms(300) 期间不跑 USB 状态机,
+				 * 这 300ms 内的插拔/枚举事件会被漏掉(用户体感"切功能要插两次")。 */
+				vTaskDelay(pdMS_TO_TICKS(300));
 				switch(g_usb_function)
 				{
 					case USBD_LOG:  usbd_cdc_init(0,USB_OTG_HS_PERIPH_BASE);  		break;
@@ -110,6 +112,10 @@ void USB_Task( void * pvParameters )
 					case USBD_GMPD: usbd_hid_init(0,USB_OTG_HS_PERIPH_BASE);    	break;
 					case USBD_MOU:  usbd_hid_init(0,USB_OTG_HS_PERIPH_BASE);    	break;
 					case USBD_KBD:  usbd_hid_init(0,USB_OTG_HS_PERIPH_BASE);    	break;
+					/* 重建分支必须包含 USBH_MSC: 离开 MSC 时 deinit 已执行(上面的
+					 * switch), 回来却什么都不做, 而末尾 last_usb_function 已更新 ——
+					 * 状态机认为"MSC 已经在跑", 之后再也认不到 U 盘。 */
+					case USBH_MSC:  usbh_msc_init(0,USB_OTG_HS_PERIPH_BASE); 		break;
 					case USBH_HID:  usbh_hid_init(0,USB_OTG_HS_PERIPH_BASE); 		break;
 					case USBH_CDC:  usbh_serial_init(0,USB_OTG_HS_PERIPH_BASE); 	break;
 					default: break;

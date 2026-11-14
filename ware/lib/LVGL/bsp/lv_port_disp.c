@@ -6,6 +6,8 @@
 #include "lcd_pwm.h"
 #include "malloc.h"
 #include <stdbool.h>
+#include "FreeRTOS.h"
+#include "task.h"
 
 #define MY_DISP_HOR_RES (240) //宽度
 #define MY_DISP_VER_RES (240) //高度
@@ -19,9 +21,32 @@ static lv_color_t *buf_2_2 = NULL;
 
 static void disp_flush(lv_disp_drv_t * disp_drv, const lv_area_t * area, lv_color_t * color_p);
 
+/* 当前正在等待 lv_disp_flush_ready() 的驱动描述符; NULL 表示没有在飞搬运。
+ * 原定义在文件中部, 因为 lv_port_disp_wait_idle() 要用, 提前到这里。 */
+static lv_disp_drv_t *current_disp_drv = NULL;
+
+/* 等待"当前没有正在进行的显存搬运"。
+ * LCD_Color_Fill() 是 DMA 搬运, disp_flush 返回时像素还在从 buf_2_x 里往外搬;
+ * 这时如果 free_bsc(buf_2_1/buf_2_2), DMA 会继续从已释放的块读数据 —— 花屏、
+ * 半幅错位, 极端情况整机卡死。返回 0=空闲 1=超时(仍有搬运在进行)。 */
+uint8_t lv_port_disp_wait_idle(uint32_t timeout_ms)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    while (current_disp_drv != NULL)
+    {
+        if ((int32_t)(xTaskGetTickCount() - deadline) >= 0) return 1;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    return 0;
+}
+
 //释放缓冲区
 void lv_port_disp_deinit(void)
 {
+    /* 先等在飞的 DMA 收尾, 再放内存。这里做统一收口,
+     * 所有调用点(媒体/游戏/副屏)都不用各自关心时序。 */
+    lv_port_disp_wait_idle(200);
+
     draw_buf_dsc_2.buf1 = NULL;
     draw_buf_dsc_2.buf2 = NULL;
 
@@ -62,8 +87,6 @@ void lv_port_disp_init(void)
     disp_drv.draw_buf = &draw_buf_dsc_2; // draw_buf_dsc_2 的地址是不变的
     lv_disp_drv_register(&disp_drv);//注册显示驱动
 }
-
-static lv_disp_drv_t *current_disp_drv = NULL;
 
 // 刷新回调函数
 // disp_drv: 显示驱动的描述符

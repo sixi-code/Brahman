@@ -49,6 +49,19 @@ static void sdcard_unlock(void)
 {
 	xSemaphoreGive(xSDcardMutex);
 }
+
+/* 对外的加锁/解锁: 供 FatFs 层(diskio.c)在"重试前重新初始化"时与数据通路互斥。
+ * 语义与内部 sdcard_lock 相同, 但允许外部模块调用, 避免 SD_Init 在锁外
+ * 重建 xSDcardMutex 与正在传输的任务互相踩踏。 */
+void sdcard_lock_external(void)
+{
+	if (xSDcardMutex != NULL) sdcard_lock();
+}
+
+void sdcard_unlock_external(void)
+{
+	if (xSDcardMutex != NULL) sdcard_unlock();
+}
  
 //SDIO寄存器复位
 static void SDIO_Register_Deinit()
@@ -132,17 +145,12 @@ SD_Error SD_Deinit(void)
     SD_PowerOFF();
     SDIO_Register_Deinit();
 
-    // 释放信号量和互斥锁
-    if (xSDcardSemaphore != NULL)
-    {
-        vSemaphoreDelete(xSDcardSemaphore);
-        xSDcardSemaphore = NULL;
-    }
-    if (xSDcardMutex != NULL)
-    {
-        vSemaphoreDelete(xSDcardMutex);
-        xSDcardMutex = NULL;
-    }
+    /* 注意: 这里绝不能 vSemaphoreDelete 这两个句柄。
+     * 拔卡时 MUSIC/FILEOP 任务可能正阻塞在 sdcard_lock() 上, 或已持有该锁;
+     * 删掉句柄后它们的 xSemaphoreGive 会落到已释放的对象上 → HardFault 或
+     * 堆损坏, 而且下次 SD_Init 重建句柄时, 持锁者手里的还是旧地址。
+     * 句柄生命周期 = 整个系统, 只需把计数信号量清空即可(下次传输会重新 Give)。 */
+    while (xSDcardSemaphore != NULL && xSemaphoreTake(xSDcardSemaphore, 0) == pdTRUE) { }
 
     // 复位内部静态变量
     CardType = SDIO_STD_CAPACITY_SD_CARD_V1_1;
@@ -942,7 +950,12 @@ SD_Error SD_ProcessIRQSrc(void)
 			SDIO_CmdInitStructure.SDIO_Wait = SDIO_Wait_No;
 			SDIO_CmdInitStructure.SDIO_CPSM = SDIO_CPSM_Enable;
 			SDIO_SendCommand(&SDIO_CmdInitStructure);	
-			TransferError=CmdResp1Error(SD_CMD_STOP_TRANSMISSION);
+			/* 注意: 不能在这里同步调用 CmdResp1Error 等 CMD12 响应 —— 这是中断上下文,
+			   卡无响应时会把 SDIO 中断(优先级 10, 高于 SysTick)永久占住, 整机停摆。
+			   CMD12 是"停止传输", 不等待响应也符合 SD 规范(响应可作为可选信息),
+			   真正需要确认的状态由任务侧的 CMD13(SD_Wait_Programming) 完成。
+			   因此只发命令、不轮询响应。 */
+			TransferError = SD_OK;
 		}else TransferError = SD_OK;	
  		SDIO->ICR|=1<<8;//清除完成中断标记
 		SDIO->MASK&=~SDIO_DATA_IRQ_MASK_OFF;//关闭相关中断
@@ -1037,10 +1050,12 @@ static SD_Error CmdResp7Error(void)
 static SD_Error CmdResp1Error(uint8_t cmd)
 {	  
    	uint32_t status; 
+	uint32_t timeout = SDIO_CMD0TIMEOUT;                  // 不能纯 while(1): 卡异常时永久自旋
 	while(1)
 	{
 		status=SDIO->STA;
 		if(status&((1<<0)|(1<<2)|(1<<6)))break; //CRC错误/命令响应超时/已经收到响应(CRC校验成功)
+		if(--timeout == 0) { SDIO_ClearFlag(SDIO_STATIC_FLAGS); return SD_CMD_RSP_TIMEOUT; }
 	} 
 	if(SDIO_GetFlagStatus(SDIO_FLAG_CTIMEOUT) != RESET)					//响应超时
 	{																				    
@@ -1062,10 +1077,12 @@ static SD_Error CmdResp1Error(uint8_t cmd)
 static SD_Error CmdResp3Error(void)
 {
 	uint32_t status;						 
+	uint32_t timeout = SDIO_CMD0TIMEOUT;                  // 同上: 必须有上限
  	while(1)
 	{
 		status=SDIO->STA;
 		if(status&((1<<0)|(1<<2)|(1<<6)))break;//CRC错误/命令响应超时/已经收到响应(CRC校验成功)	
+		if(--timeout == 0) { SDIO_ClearFlag(SDIO_STATIC_FLAGS); return SD_CMD_RSP_TIMEOUT; }
 	}
  	if(SDIO_GetFlagStatus(SDIO_FLAG_CTIMEOUT) != RESET)					//响应超时
 	{											 
@@ -1112,10 +1129,12 @@ static SD_Error CmdResp6Error(uint8_t cmd,uint16_t*prca)
 	SD_Error errorstatus=SD_OK;
 	uint32_t status;					    
 	uint32_t rspr1;
+	uint32_t timeout = SDIO_CMD0TIMEOUT;                  // 同上: 必须有上限
  	while(1)
 	{
 		status=SDIO->STA;
 		if(status&((1<<0)|(1<<2)|(1<<6)))break;//CRC错误/命令响应超时/已经收到响应(CRC校验成功)	
+		if(--timeout == 0) { SDIO_ClearFlag(SDIO_STATIC_FLAGS); return SD_CMD_RSP_TIMEOUT; }
 	}
 	if(SDIO_GetFlagStatus(SDIO_FLAG_CTIMEOUT) != RESET)					//响应超时
 	{																				    
@@ -1199,7 +1218,13 @@ static SD_Error IsCardProgramming(uint8_t *pstatus)
 
 	status=SDIO->STA;
 	
-	while(!(status&((1<<0)|(1<<6)|(1<<2))))status=SDIO->STA;//等待操作完成
+	{   // 等待操作完成 (IsCardProgramming): 无上限会永久挂死
+		uint32_t timeout = SDIO_CMD0TIMEOUT;
+		while(!(status&((1<<0)|(1<<6)|(1<<2)))) {
+			status=SDIO->STA;
+			if(--timeout == 0) { SDIO_ClearFlag(SDIO_STATIC_FLAGS); return SD_CMD_RSP_TIMEOUT; }
+		}
+	}
    	if(SDIO_GetFlagStatus(SDIO_FLAG_CCRCFAIL) != RESET)			//CRC检测失败
 	{  
 	    SDIO_ClearFlag(SDIO_FLAG_CCRCFAIL);	//清除错误标记

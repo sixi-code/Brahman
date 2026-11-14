@@ -117,15 +117,25 @@ uint8_t mp3_id3v2_decode(uint8_t* buf,uint32_t size,__mp3ctrl *pctrl)
 		t=10;
 		while(t<tagsize)
 		{
+			/* 三重越界防护(畸形标签会让下面每一行都越界):
+			 * 1) 帧头本身要完整落在 tagsize 内;
+			 * 2) frame_size==0 会让 t 不前进 → 死循环 + 反复抄同一块垃圾;
+			 * 3) 帧体必须完整落在 tagsize 内, 否则 strncpy 从越界处取数据;
+			 * 4) 抄完必须补 '\0', 否则 title/artist 读出去是越界内容。 */
+			if (t + sizeof(ID3V23_FrameHead) > tagsize) break;
 			framehead=(ID3V23_FrameHead*)(buf+t);
 			frame_size=((uint32_t)framehead->size[0]<<24)|((uint32_t)framehead->size[1]<<16)|((uint32_t)framehead->size[2]<<8)|framehead->size[3];//得到帧大小
+			if (frame_size == 0 || frame_size > tagsize - t - sizeof(ID3V23_FrameHead)) break;
+
  			if (strncmp("TT2",(char*)framehead->id,3)==0||strncmp("TIT2",(char*)framehead->id,4)==0)//找到歌曲标题帧,不支持unicode格式!!
 			{
 				strncpy((char*)pctrl->title,(char*)(buf+t+sizeof(ID3V23_FrameHead)+1),AUDIO_MIN(frame_size-1,MP3_TITSIZE_MAX-1));
+				pctrl->title[AUDIO_MIN(frame_size-1,MP3_TITSIZE_MAX-1)]='\0';
 			}
  			if (strncmp("TP1",(char*)framehead->id,3)==0||strncmp("TPE1",(char*)framehead->id,4)==0)//找到歌曲艺术家帧
 			{
 				strncpy((char*)pctrl->artist,(char*)(buf+t+sizeof(ID3V23_FrameHead)+1),AUDIO_MIN(frame_size-1,MP3_ARTSIZE_MAX-1));
+				pctrl->artist[AUDIO_MIN(frame_size-1,MP3_ARTSIZE_MAX-1)]='\0';
 			}
 			t+=frame_size+sizeof(ID3V23_FrameHead);
 		} 
@@ -167,9 +177,14 @@ uint8_t mp3_get_info(uint8_t *pname,__mp3ctrl* pctrl)
 	if(!res)//读取文件成功,开始解析ID3V2/ID3V1以及获取MP3信息
 	{
 		mp3_id3v2_decode(buf,br,pctrl);	//解析ID3V2数据
-		f_lseek(fmp3, f_size(fmp3) - 128);//偏移到倒数128的位置
-		f_read(fmp3,(char*)buf,128,&br);//读取128字节
-		mp3_id3v1_decode(buf,pctrl);	//解析ID3V1数据  
+		/* 小于 128B 的文件 f_size-128 会下溢成 0xFFFFFFxx, 之后 f_read 返回 0
+		 * 而 buf 里是上一段残留数据, ID3v1 解析读到的是垃圾。先判长度。 */
+		if (f_size(fmp3) >= 128)
+		{
+			f_lseek(fmp3, f_size(fmp3) - 128);//偏移到倒数128的位置
+			f_read(fmp3,(char*)buf,128,&br);//读取128字节
+			if (br == 128) mp3_id3v1_decode(buf,pctrl);	//解析ID3V1数据
+		}
 		decoder = MP3InitDecoder(); 	//MP3解码申请内存
 		if(!decoder) res = 3;
 	}
@@ -182,12 +197,16 @@ uint8_t mp3_get_info(uint8_t *pname,__mp3ctrl* pctrl)
 		{ 
 			p=offset+4+32;//偏移到Xing帧的起始位置,32是MPEG1,layer3,立体声的帧头大小
 			fvbri=(MP3_FrameVBRI*)(buf+p);//偏移到VBRI帧的起始位置,32是MPEG1,layer3,立体声的帧头大小
-			if(strncmp("VBRI",(char*)fvbri->id,4)==0)//存在VBRI帧(VBR格式)
+			/* offset 来自 MP3FindSyncWord, 理论最大可到 br-1, 此时 p 已越出 5KB 缓冲,
+			 * fvbri->id 是越界读; 命中后还会用越界内容算 totsec 并做除法。
+			 * 先确认 VBRI 结构完整落在已读数据内, 且采样率非 0。 */
+			if(p + sizeof(MP3_FrameVBRI) <= br &&
+			   strncmp("VBRI",(char*)fvbri->id,4)==0)//存在VBRI帧(VBR格式)
 			{
 				if (frame_info.version==MPEG1)samples_per_frame=1152;//MPEG1,layer3每帧采样数等于1152
 				else samples_per_frame=576;//MPEG2/MPEG2.5,layer3每帧采样数等于576 
 				totframes=((uint32_t)fvbri->frames[0]<<24)|((uint32_t)fvbri->frames[1]<<16)|((uint16_t)fvbri->frames[2]<<8)|fvbri->frames[3];//得到总帧数
-				pctrl->totsec=totframes*samples_per_frame/frame_info.samprate;//得到文件总长度
+				if(frame_info.samprate) pctrl->totsec=totframes*samples_per_frame/frame_info.samprate;//得到文件总长度
 			}
 			else	//不是VBRI帧,尝试是不是Xing帧(VBR格式)
 			{  	
@@ -203,21 +222,23 @@ uint8_t mp3_get_info(uint8_t *pname,__mp3ctrl* pctrl)
 				}
 				p+=offset+4;
 				fxing=(MP3_FrameXing*)(buf+p);
-				if(strncmp("Xing",(char*)fxing->id,4)==0||strncmp("Info",(char*)fxing->id,4)==0)//是Xng帧
+				/* 同 VBRI: 先确认 Xing 结构落在已读数据内再解引用 */
+				if(p + sizeof(MP3_FrameXing) > br) pctrl->totsec = 0;
+				else if(strncmp("Xing",(char*)fxing->id,4)==0||strncmp("Info",(char*)fxing->id,4)==0)//是Xng帧
 				{
 					if(fxing->flags[3]&0X01)//存在总frame字段
 					{
 						totframes=((uint32_t)fxing->frames[0]<<24)|((uint32_t)fxing->frames[1]<<16)|((uint16_t)fxing->frames[2]<<8)|fxing->frames[3];//得到总帧数
-						pctrl->totsec=totframes*samples_per_frame/frame_info.samprate;//得到文件总长度
+						if(frame_info.samprate) pctrl->totsec=totframes*samples_per_frame/frame_info.samprate;//得到文件总长度
 					}
 					else	//不存在总frames字段
 					{
-						pctrl->totsec = ((f_size(fmp3) * 8) / frame_info.bitrate); 
+						pctrl->totsec = frame_info.bitrate ? ((f_size(fmp3) * 8) / frame_info.bitrate) : 0;
 					} 
 				}
 				else 		//CBR格式,直接计算总播放时间
 				{
-					pctrl->totsec = ((f_size(fmp3) * 8) / frame_info.bitrate);
+					pctrl->totsec = frame_info.bitrate ? ((f_size(fmp3) * 8) / frame_info.bitrate) : 0;
 				}
 			} 
 			pctrl->bitrate=frame_info.bitrate;			//得到当前帧的码率
@@ -286,18 +307,25 @@ uint8_t mp3_play_song_prepare(uint8_t* fname)
  	mp3ctrl=malloc_bsc(sizeof(__mp3ctrl)); 
 	mp3_buffer=malloc_bsc(MP3_FILE_BUF_SZ); 	//申请解码buf大小
 	music_ctrl.file=(FIL*)malloc_bsc(sizeof(FIL));
+	/* FIL 必须在使用前清零, 而下面的失败路径会无条件 f_close()。
+	 * bsc 碎片化导致某块分配失败时, FIL 里是上一首歌残留的堆数据,
+	 * f_close 会让 FatFs 用垃圾 fs 指针做校验 → HardFault。
+	 * 只要不为 NULL 就立刻清零, 保证 f_close 看到的是"未打开"的合法状态。 */
+	if(music_ctrl.file) memset(music_ctrl.file,0,sizeof(FIL));
 	music_ctrl.i2sbuf1=malloc_bsc(2304*2*sizeof(uint16_t));
 	music_ctrl.i2sbuf2=malloc_bsc(2304*2*sizeof(uint16_t));
 	music_ctrl.tbuf=malloc_bsc(2304*2*sizeof(uint16_t));
 	
 	if(!mp3ctrl||!mp3_buffer||!music_ctrl.file||!music_ctrl.i2sbuf1||!music_ctrl.i2sbuf2||!music_ctrl.tbuf)
 	{
-		free_bsc(mp3ctrl);
-		free_bsc(mp3_buffer);
-		free_bsc(music_ctrl.file);
-		free_bsc(music_ctrl.i2sbuf1);
-		free_bsc(music_ctrl.i2sbuf2);
-		free_bsc(music_ctrl.tbuf); 
+		/* 释放后必须置 NULL: 后面的统一失败路径还会 f_close()/free_bsc()
+		 * 这几个指针, 不置空就是对已释放内存二次释放 + 用野指针调 f_close。 */
+		free_bsc(mp3ctrl);          mp3ctrl = NULL;
+		free_bsc(mp3_buffer);       mp3_buffer = NULL;
+		free_bsc(music_ctrl.file);  music_ctrl.file = NULL;
+		free_bsc(music_ctrl.i2sbuf1); music_ctrl.i2sbuf1 = NULL;
+		free_bsc(music_ctrl.i2sbuf2); music_ctrl.i2sbuf2 = NULL;
+		free_bsc(music_ctrl.tbuf);  music_ctrl.tbuf = NULL;
 		res = 1;
 	}
 	if(res==0)
@@ -328,9 +356,12 @@ uint8_t mp3_play_song_prepare(uint8_t* fname)
 	}
 	if(res)
 	{
-		f_close(music_ctrl.file);
-		free_bsc(music_ctrl.file); 
-		music_ctrl.file = NULL;
+		if(music_ctrl.file)   // 见上: 分配失败路径已置 NULL
+		{
+			f_close(music_ctrl.file);
+			free_bsc(music_ctrl.file); 
+			music_ctrl.file = NULL;
+		}
 	}
 	return res;
 }

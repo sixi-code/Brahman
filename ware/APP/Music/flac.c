@@ -154,6 +154,8 @@ uint8_t flac_play_song_prepare(uint8_t* fname)
     // 内存分配(控制结构 + 文件对象 + 双 DMA 缓冲 + 压缩数据缓冲)
     flacctrl = malloc_bsc(sizeof(__flacctrl));// FLAC控制结构体
     music_ctrl.file = (FIL*)malloc_bsc(sizeof(FIL));// 文件对象
+    /* 分配成功即清零, 保证失败路径的 f_close() 看到的是合法空对象 */
+    if(music_ctrl.file) memset(music_ctrl.file, 0, sizeof(FIL));
     
     if(!music_ctrl.file || !flacctrl) res = 1; // 内存申请错误
 

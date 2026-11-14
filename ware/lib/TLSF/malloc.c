@@ -66,6 +66,7 @@ uint8_t tlsf_init(void)
 volatile uint32_t g_malloc_fail_size  = 0;// 分配失败时的请求大小
 volatile uint32_t g_realloc_fail_size = 0;// 重分配失败时的请求大小
 volatile uint32_t g_realloc_fail_old  = 0;// 重分配失败时的原大小
+volatile uint32_t g_malloc_fail_cnt   = 0;// 分配失败累计次数 (0 表示从未失败)
 
 //bsc池内存分配
 //bytes:请求分配的字节数
@@ -77,10 +78,11 @@ void *malloc_bsc(uint32_t bytes)
 	ptr = tlsf_malloc(tlsf_bsc, bytes);
 	if(RTOS_OK) xSemaphoreGive(xBSCMutex);
 
-	// 调试：分配失败时死循环，方便用调试器查看调用栈和请求大小
+	// 分配失败只记录并返回 NULL, 由调用方按已有约定降级处理
+	// (此处不可调用 tsdb_log_write: 日志自身依赖 malloc_bsc, 会递归)
 	if (ptr == NULL && bytes > 0) {
 		g_malloc_fail_size = bytes;
-		while(1);
+		g_malloc_fail_cnt++;
 	}
     return ptr;
 }
@@ -108,7 +110,7 @@ void *realloc_bsc(void* ptr, uint32_t bytes)
 	if (new_ptr == NULL && bytes > 0) {
 		g_realloc_fail_size = bytes;
 		g_realloc_fail_old  = old_size;
-		while(1);
+		g_malloc_fail_cnt++;
 	}
     return new_ptr;
 }
@@ -177,7 +179,10 @@ void tlsf_monitor_bsc(mem_monitor_t* mon)
 {
 	if(RTOS_OK) xSemaphoreTake(xBSCMutex, portMAX_DELAY);
 	
-    if (mon == NULL || bsc_pool == NULL) return;
+    if (mon == NULL || bsc_pool == NULL) {
+        if(RTOS_OK) xSemaphoreGive(xBSCMutex);   // 提前返回必须解锁, 否则整池永久死锁
+        return;
+    }
 
     // 初始化监控数据
     memset(mon, 0, sizeof(mem_monitor_t));
@@ -206,7 +211,10 @@ void tlsf_monitor_ccm(mem_monitor_t* mon)
 {
 	if(RTOS_OK) xSemaphoreTake(xCCMMutex, portMAX_DELAY);
 	
-    if (mon == NULL || ccm_pool == NULL) return;
+    if (mon == NULL || ccm_pool == NULL) {
+        if(RTOS_OK) xSemaphoreGive(xCCMMutex);   // 提前返回必须解锁, 否则整池永久死锁
+        return;
+    }
 
     // 初始化监控数据
     memset(mon, 0, sizeof(mem_monitor_t));

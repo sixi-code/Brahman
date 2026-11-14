@@ -146,8 +146,21 @@ static void TFcard_Isconnecting_Pin_Init(void){
 // 检测TF卡连接状态
 //   PB8低电平 → TF卡已连接
 //   PB8高电平 → TF卡未连接
+/* 20ms x 5 = 100ms 去抖。
+ * 单次采样会被弹片抖动带偏: 抖一下就立刻触发 SD_Init+fatfs_mount 或
+ * SD_Deinit+fatfs_unmount, 与拔卡时的锁/卷时序叠加, 反复插拔能把
+ * 文件系统直接写坏(表现为"卡里文件全变 0 字节或目录消失")。 */
 void Is_TFcard_Connecting(void){
-    g_TFcard_status = GPIO_ReadInputDataBit(GPIOB, GPIO_Pin_8) ? 0 : 1;
+    static uint8_t cnt = 0, last = 0;
+    uint8_t now = GPIO_ReadInputDataBit(GPIOB, GPIO_Pin_8) ? 0 : 1;
+
+    if (now == last) {
+        if (cnt < 5) cnt++;
+    } else {
+        last = now;
+        cnt = 0;
+    }
+    if (cnt >= 5) g_TFcard_status = last;   // 连续 5 拍(100ms)一致才采纳
 }
 
 // I2S音频切换引脚初始化

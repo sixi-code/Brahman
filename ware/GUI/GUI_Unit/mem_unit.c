@@ -17,6 +17,9 @@ static lv_obj_t *mem_label_title;   // 标题文本
 static lv_obj_t *mem_label_info1;   // 信息文本1 (显示在图表下方，仅RAM/CPU模式可见)
 static lv_obj_t *mem_label_info2;   // 信息文本2 (显示在图表上方，所有模式可见)
 static lv_chart_series_t *mem_ser;  // 图表数据系列
+/* 任务状态快照。放在 LVGL 任务栈上时 20 个 TaskStatus_t 就占掉约 0.5KB,
+ * 再叠加 lv_table 绘制深度就会踩栈。改为堆上一次申请、页面退出释放。 */
+static TaskStatus_t *mem_task_status;
 
 /* 显示模式枚举 */
 typedef enum {
@@ -190,10 +193,16 @@ void Update_Mem_Chart(void)
 
     if (current_view_mode == VIEW_MODE_TASKS) {
         /* ----- 进程列表 模式 ----- */
-        TaskStatus_t task_status_array[MAX_TASK_DISPLAY_COUNT];
+        /* 栈上 TaskStatus_t[20] 约 480-560B, 而 LVGL 任务栈只有 2KB(512 words),
+         * 叠加 lv_table 绘制与 snprintf 的调用深度很容易见底 —— 表现为只在
+         * "进 mem 页 + 切到进程列表"时随机复位。改用按需申请的静态指针。 */
+        if (mem_task_status == NULL) {
+            mem_task_status = (TaskStatus_t *)malloc_bsc(sizeof(TaskStatus_t) * MAX_TASK_DISPLAY_COUNT);
+            if (mem_task_status == NULL) return;   // 申请不到就这一轮不刷新, 不影响主循环
+        }
         uint32_t total_runtime;// 总运行时间
         
-        UBaseType_t task_count = uxTaskGetSystemState(task_status_array, MAX_TASK_DISPLAY_COUNT, &total_runtime);
+        UBaseType_t task_count = uxTaskGetSystemState(mem_task_status, MAX_TASK_DISPLAY_COUNT, &total_runtime);
         
         /* 表格行数为 任务数 + 1 (表头占用第 0 行) */
         lv_table_set_row_cnt(task_table, task_count + 1);
@@ -209,7 +218,7 @@ void Update_Mem_Chart(void)
         
         for (int i = 0; i < task_count; i++) {
             char* state_str;
-            switch(task_status_array[i].eCurrentState) {
+            switch(mem_task_status[i].eCurrentState) {
                 case eRunning:   state_str = "Run"; break;
                 case eReady:     state_str = "Rdy"; break;
                 case eBlocked:   state_str = "Blk"; break;
@@ -218,15 +227,15 @@ void Update_Mem_Chart(void)
                 default:         state_str = "?";  break;
             }
             
-            uint32_t runtime_pct = task_status_array[i].ulRunTimeCounter / total_runtime_div;
+            uint32_t runtime_pct = mem_task_status[i].ulRunTimeCounter / total_runtime_div;
             if (runtime_pct > 100) runtime_pct = 100; 
             
             /* 实际任务数据写入 i + 1 行 */
             int row = i + 1;
-            lv_table_set_cell_value(task_table, row, 0, task_status_array[i].pcTaskName);
+            lv_table_set_cell_value(task_table, row, 0, mem_task_status[i].pcTaskName);
             lv_table_set_cell_value(task_table, row, 1, state_str);
             lv_table_set_cell_value_fmt(task_table, row, 2, "%lu%%", runtime_pct);
-            lv_table_set_cell_value_fmt(task_table, row, 3, "%u", task_status_array[i].usStackHighWaterMark);
+            lv_table_set_cell_value_fmt(task_table, row, 3, "%u", mem_task_status[i].usStackHighWaterMark);
         }
     }
     else if (current_view_mode == VIEW_MODE_CPU) {
@@ -277,5 +286,10 @@ void Remove_Mem_Chart(void)
         mem_label_info1 = NULL;
         mem_label_info2 = NULL;
         mem_ser = NULL;
+    }
+    /* 页面退出时把任务快照缓冲还给 BSC 池(下一步再进 mem 页会重新申请) */
+    if (mem_task_status != NULL) {
+        free_bsc(mem_task_status);
+        mem_task_status = NULL;
     }
 }

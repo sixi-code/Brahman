@@ -150,8 +150,13 @@ uint8_t I2S2_SampleRate_Set(uint32_t samplerate)
     for(i=0;i<I2S_PSC_ROW_COUNT;i++)//看看改采样率是否可以支持（I2S_PSC_ROW_COUNT是行数）
         if(samplerate==I2S_PSC_TBL[i][0])break;
 
-    RCC_PLLI2SCmd(DISABLE);//先关闭PLLI2S
-    if(i==I2S_PSC_ROW_COUNT)return 1;//搜遍了也找不到
+    /* 先判"是否支持"再动 PLL。
+     * 顺序必须"先判断再动作": 先关 PLL 再判断, 不支持时直接 return 1 会把 PLLI2S
+     * 永久留在关闭状态: 之后任何播放都变成静音/极慢, 只能掉电重启
+     * (ES9018_Init 也不重配 PLL)。 */
+    if(i==I2S_PSC_ROW_COUNT)return 1;//搜遍了也找不到(不动现有 PLL 配置)
+
+    RCC_PLLI2SCmd(DISABLE);//关闭PLLI2S以便重配(下面成对重新开启)
     RCC_PLLI2SConfig((uint32_t)I2S_PSC_TBL[i][1],(uint32_t)I2S_PSC_TBL[i][2]);//配置PLLI2N参数和PLLI2R参数
  
     RCC->CR|=1<<26;                    //开启I2S时钟

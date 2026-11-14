@@ -15,5 +15,6 @@ void Font_Task(void *pvParameters);
 void FileOp_Task(void *pvParameters);
 
 void Taskmanager_Ctrl(uint8_t task_num,uint8_t task_action,uint8_t IsFromISR);
+uint8_t Taskmanager_Wait_Suspended(uint8_t task_num, uint32_t timeout_ms);
 	
 #endif

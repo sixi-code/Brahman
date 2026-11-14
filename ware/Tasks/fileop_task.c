@@ -14,10 +14,18 @@ extern int do_write_text(const char * path, const char * text);
 
 void FileOp_Task(void *pvParameters)
 {
-    // 等待 SD 卡初始化完成
-    while (!g_TFcard_inited)
+    /* 等待 SD 卡初始化完成。
+     * 必须有等待上限: 卡一直不插时若无限等, 这个任务会永久挂在
+     * 这里, Taskmanager_Ctrl 的 Suspend/Delete 也管不到它(它不响应状态机),
+     * 结果任务槽位与栈永久被占。改成最多等 60s, 之后自我注销。 */
+    for (uint32_t w = 0; w < 600 && !g_TFcard_inited; w++)
     {
         vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (!g_TFcard_inited)
+    {
+        Taskmanager_Ctrl(Task_N_FileOp, Task_T_Delete, 0);
+        vTaskDelete(NULL);
     }
 
     while (1)
@@ -64,5 +72,9 @@ void FileOp_Task(void *pvParameters)
         g_file_op_busy   = 0;   // 通知 UI 操作完成
         g_file_op_done   = 1;   // 触发 UI 刷新
         g_file_op_cmd    = 0;   // 回到空闲状态
+
+        /* 页面在操作期间被退出时, Remove_File_Unit() 不能释放 op_progress
+         * (后台正在累加进度)。现在操作结束, 由这里回收, 避免内存泄漏。 */
+        file_op_progress_reclaim();
     }
 }

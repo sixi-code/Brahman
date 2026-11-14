@@ -44,10 +44,13 @@ void kvdb_persist_flush(void)
     if (!kvdb.parent.init_ok) return;
 
     uint32_t dirty[DIRTY_WORDS];
-    GLOBAL(
-        memcpy(dirty, persist_dirty, sizeof(dirty));
-        memset(persist_dirty, 0, sizeof(persist_dirty));
-    );
+    /* 只取快照, 不清脏位。
+     * 不能 copy 完立刻 memset(persist_dirty, 0):
+     * 写循环每条 fdb_kv_set_blob 都要几十 ms(含 flash 擦写), 期间别的任务
+     * 调 kvdb_persist_mark() 置的脏位不在快照里, 写完又不会被清 —— 结果
+     * 那次修改永远留不下("音量/输出通道重启后复位")。
+     * 现在改为"成功才清位", 期间的新标记自然保留到下一轮。 */
+    GLOBAL(memcpy(dirty, persist_dirty, sizeof(dirty)););
 
     for (int i = 0; i < PERSIST_COUNT; i++) {
         if (dirty[i / 32] & (1U << (i % 32))) {
@@ -55,9 +58,12 @@ void kvdb_persist_flush(void)
             struct fdb_blob blob;
             fdb_err_t ret = fdb_kv_set_blob(&kvdb, e->key,
                             fdb_blob_make(&blob, e->ptr, e->size));
-            if (ret != FDB_NO_ERR) {
-                GLOBAL(persist_dirty[i / 32] |= (1U << (i % 32)));
+            if (ret == FDB_NO_ERR) {
+                /* 写入成功才清脏位; 清之前若期间又被标记, 位仍为 1 也不错,
+                   因为那一轮的值已经进到 flash 了(值引用的是同一块内存)。 */
+                GLOBAL(persist_dirty[i / 32] &= ~(1U << (i % 32)););
             }
+            /* 失败: 保留脏位, 下一轮重试 */
         }
     }
 }

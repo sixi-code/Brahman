@@ -10,6 +10,7 @@
 #include "page_manager.h"
 #include "task_manager.h"
 #include "malloc.h"
+#include "iwdg_feed.h"
 
 extern const lv_img_dsc_t file_exit_icon;
 extern const lv_img_dsc_t file_file_icon;
@@ -31,6 +32,9 @@ typedef struct {
 
 // 仅占用 4 字节指针静态内存，实际内存复用动态堆
 static file_op_progress_t * op_progress = NULL; 
+
+// 前向声明: 定义在文件后面的"拦截引擎"段, 但 op_btn_event_cb 等处先用到
+static void build_full_path(char *dst, const char *name);
 
 static lv_obj_t * op_win = NULL; // 进度弹窗对象
 static lv_obj_t * op_label = NULL; // 进度标签对象
@@ -92,7 +96,9 @@ int do_delete(const char* path) {
         if (f_opendir(&dir, path) == FR_OK) {
             while(1) {
                 if (f_readdir(&dir, &fno) != FR_OK || fno.fname[0] == 0) break;
+                IWDG_FEED_SAFE();   // 大目录递归删除可能远超看门狗超时
                 char *sub = malloc_bsc(strlen(path) + strlen(fno.fname) + 2);//+2用于 '/' 和 '\0'
+                if (sub == NULL) break;             // 分配失败: 停止递归, 不要解引用空指针
                 sprintf(sub, "%s/%s", path, fno.fname);
                 do_delete(sub);
                 free_bsc(sub);
@@ -125,9 +131,15 @@ int do_copy(const char* src, const char* dst) {
         if (f_opendir(&dir, src) == FR_OK) {
             while(1) {
                 if (f_readdir(&dir, &fno) != FR_OK || fno.fname[0] == 0) break;
+                IWDG_FEED_SAFE();   // 大目录递归复制可能远超看门狗超时
                 // 为子文件/文件夹分配内存
                 char *sub_src = malloc_bsc(strlen(src) + strlen(fno.fname) + 2);
                 char *sub_dst = malloc_bsc(strlen(dst) + strlen(fno.fname) + 2);
+                if (sub_src == NULL || sub_dst == NULL) {   // 分配失败: 清理后放弃本项
+                    if (sub_src) free_bsc(sub_src);
+                    if (sub_dst) free_bsc(sub_dst);
+                    break;
+                }
                 sprintf(sub_src, "%s/%s", src, fno.fname);
                 sprintf(sub_dst, "%s/%s", dst, fno.fname);
                 do_copy(sub_src, sub_dst);
@@ -153,6 +165,7 @@ int do_copy(const char* src, const char* dst) {
         if(buf) {
             UINT br, bw;
             while(1) {
+                IWDG_FEED_SAFE();   // 单个大文件复制同样可能超过看门狗超时
                 f_read(&fsrc, buf, 4096, &br);
                 if (br == 0) break;
                 f_write(&fdst, buf, br, &bw);
@@ -202,12 +215,10 @@ static void op_btn_event_cb(lv_event_t * e) {
                 if(basename) basename++; else basename = op_path;
             } else basename++;
 
-            char target[256] = {0};
-            strcpy(target, current_path);
-            int len = strlen(target);
-            if (len > 0 && target[len-1] != '/' && target[len-1] != ':') strcat(target, "/");
-            else if (len > 0 && target[len-1] == ':') strcat(target, "/");
-            strcat(target, basename);
+            /* 不能是栈上 char target[256] + strcpy/strcat:
+               深目录下第二次 strcat 就写穿返回地址。改为有界拼接。 */
+            char target[FILE_PATH_MAX] = {0};
+            build_full_path(target, basename);
 
             // 检查目标路径是否与源路径相同，避免自我复制
             if (strncmp(target, op_path, strlen(op_path)) != 0) {
@@ -266,7 +277,10 @@ static void op_btn_event_cb(lv_event_t * e) {
 static void update_op_buttons(void) {
     if (!btn_copy || !btn_paste || !btn_delete) return;
 
-    if (strcmp(current_path, "") == 0) {
+    /* current_path 可能因 BSC 分配失败而为 NULL。
+     * Create_File_Unit 里已改成"分配不到就不建页面", 但 update/path_go_back
+     * 这些函数在别的路径(切盘、返回)下也可能先被调到, 一律当空路径处理。 */
+    if (current_path == NULL || current_path[0] == '\0') {
         lv_obj_add_flag(btn_copy, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(btn_paste, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(btn_delete, LV_OBJ_FLAG_HIDDEN);
@@ -314,8 +328,9 @@ static uint8_t get_available_drives(void)
 
 static void path_go_back(void)
 {
-    if (strcmp(current_path, "") == 0 || strcmp(current_path, "/") == 0) {
-        strcpy(current_path, "");
+    if (current_path == NULL) return;   // 没有路径缓冲: 无可后退
+    if (current_path[0] == '\0' || strcmp(current_path, "/") == 0) {
+        current_path[0] = '\0';
         return;
     }
     char *last_slash = strrchr(current_path, '/');
@@ -326,19 +341,27 @@ static void path_go_back(void)
 // ============== 拦截引擎 ==============
 
 
+/* 拼接 current_path + name 到 dst。
+ * 全部走 snprintf 的有界版本: strcpy+两次strcat 时进 3 层以上目录就会
+ * 写爆 current_path 那块 256B 堆块(踩 TLSF 块头)或栈上 target[256]。
+ * 截断时 snprintf 自动补 '\0', 不会越界; 路径过长会打不开文件, 但不会崩。 */
 static void build_full_path(char *dst, const char *name) {
-    strcpy(dst, current_path);
-    int len = strlen(dst);
-    if (len > 0 && dst[len-1] != '/' && dst[len-1] != ':') strcat(dst, "/");
-    else if (len > 0 && dst[len-1] == ':') strcat(dst, "/");
-    strcat(dst, name);
+    const char *base = (current_path != NULL) ? current_path : "";
+    size_t len;
+    snprintf(dst, FILE_PATH_MAX, "%s", base);
+    len = strlen(dst);
+    if (len > 0 && dst[len - 1] != '/') {
+        snprintf(dst + len, FILE_PATH_MAX - len, "/%s", name ? name : "");
+    } else {
+        snprintf(dst + len, FILE_PATH_MAX - len, "%s", name ? name : "");
+    }
 }
 
 
 // 检查当前操作状态机是否需要拦截文件夹或文件点击事件
 static bool intercept_operation(const char *name) {
     if (op_mode == OP_COPY_WAITING || op_mode == OP_DEL_WAITING) {
-        if (!op_path) op_path = malloc_bsc(256);
+        if (!op_path) op_path = malloc_bsc(FILE_PATH_MAX);
         if (op_path) build_full_path(op_path, name);
         
         if (op_mode == OP_COPY_WAITING) op_mode = OP_COPY_READY;
@@ -356,12 +379,16 @@ static void folder_click_event_cb(lv_event_t * e)
     
     if(intercept_operation(folder_name)) return;
 
+    /* 全部有界, 不能 strcat(current_path, "/") + strcat(current_path, folder_name):
+       深目录下会写爆 current_path 的堆块。 */
     if (strcmp(current_path, "") == 0) {
-        strcpy(current_path, folder_name);
-        if (strchr(current_path, ':') == NULL) strcat(current_path, ":");
+        snprintf(current_path, FILE_PATH_MAX, "%s", folder_name);
+        if (strchr(current_path, ':') == NULL) {
+            size_t l = strlen(current_path);
+            snprintf(current_path + l, FILE_PATH_MAX - l, ":");
+        }
     } else {
-        if (current_path[strlen(current_path) - 1] != '/') strcat(current_path, "/");
-        strcat(current_path, folder_name);
+        build_full_path(current_path, folder_name);
     }
     Update_File();
 }
@@ -373,7 +400,7 @@ static void file_click_event_cb(lv_event_t * e)
 
     if(intercept_operation(file_name)) return;
 
-    if (!chosen_file_path) chosen_file_path = malloc_bsc(256);
+    if (!chosen_file_path) chosen_file_path = malloc_bsc(FILE_PATH_MAX);
     if (!chosen_file_path) return;
     
     build_full_path(chosen_file_path, file_name);
@@ -408,7 +435,7 @@ static void load_file_list(void)
     lv_obj_clean(file_list_cont);
     int y_ofs = 0;
 
-    if (strcmp(current_path, "") == 0) 
+    if (current_path == NULL || current_path[0] == '\0')
     {
         for (int i = 0; i < 3; i++) {
             char drive_path[8];
@@ -526,7 +553,7 @@ static void Update_File(void)
 {
     if (file_unit_cont == NULL) return;
 
-    if (strcmp(current_path, "") == 0) {
+    if (current_path == NULL || current_path[0] == '\0') {
         lv_label_set_text(path_label, "此电脑");
         last_drive_mask = get_available_drives();
     } else {
@@ -569,7 +596,15 @@ void Create_File_Unit(void)
 {
     if (file_unit_cont != NULL) return;
 
-    if (current_path == NULL) current_path = malloc_bsc(256);
+    if (current_path == NULL) {
+        current_path = malloc_bsc(FILE_PATH_MAX);
+        if (current_path == NULL) {
+            // 路径缓冲都申请不到: 不建页面, 直接返回。
+            // 若继续往下走, 后续所有 strcmp(current_path, "") 都会解引用空指针。
+            return;
+        }
+        current_path[0] = '\0';   // 只在新分配时置空; 已存在时保留 page_arg_set 传进来的目录
+    }
 
     // 初始化状态
     g_file_chosen = 0;
@@ -709,7 +744,7 @@ void Update_File_Unit(void)
         // 检测到盘符状态变化，刷新文件列表（当前使用盘符如拔出回到根目录）以避免死机
         if (current_mask != last_drive_mask) {
             last_drive_mask = current_mask;
-            if (strcmp(current_path, "") != 0) {
+            if (current_path != NULL && current_path[0] != '\0') {
                 int current_drive = current_path[0] - '0';
                 if (current_drive >= 0 && current_drive <= 2) {
                     if ((current_mask & (1 << current_drive)) == 0) {
@@ -794,12 +829,24 @@ void Remove_File_Unit(void)
         free_bsc(current_path);
         current_path = NULL;
     }
-    // 处理掉动态申请的进度结构体
-    if (op_progress) {
-        free_bsc(op_progress);
-        op_progress = NULL;
-    }
+    /* 后台 FileOp 任务还在跑(do_copy/do_delete)时, 它正通过 op_progress
+     * 累加进度、通过 g_async_src/g_async_dst 读路径。这里无条件 free 的话,
+     * 后台任务随后就写进已释放的块 → UAF / TLSF 块头被踩。
+     * 统一交给 reset_op_state(): 它按 g_file_op_busy 决定"现在释放"还是
+     * "留给 FileOp 任务收尾时释放"。 */
     reset_op_state(); 
+}
+
+/* 后台操作收尾时的统一回收点 (由 FileOp_Task 在 g_file_op_busy=0 之后调用)。
+ * 页面已经退出时 Remove_File_Unit() 不敢 free op_progress(后台还在用),
+ * 那些块就由这里在"确实没有人在用"之后回收, 避免每做一次复制/删除漏 300B。 */
+void file_op_progress_reclaim(void)
+{
+    if (g_file_op_busy) return;      // 还有新一轮操作在跑, 不能动
+    if (op_progress) { free_bsc(op_progress); op_progress = NULL; }
+    if (file_unit_cont == NULL) {    // 页面已退出: 停止刷新已不存在的 UI 对象
+        op_win = op_label = op_bar = NULL;
+    }
 }
 
 // 释放选中文件路径的内存(在文件浏览器关闭或切换页面时调用 如打开文本编辑器或媒体播放器时)

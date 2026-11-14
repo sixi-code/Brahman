@@ -6,6 +6,7 @@
 #include "task.h"
 #include "semphr.h"
 #include "variables.h"
+#include "iwdg_feed.h"
 
 #define W25X_WriteEnable        0x06 // 写使能
 #define W25X_WriteDisable       0x04 // 写禁止
@@ -78,12 +79,32 @@ static void flash_unlock(void)
     }
 }
 
+/* SPI3 单字节收发超时上限(循环次数)。
+ * 24MHz SPI、8bit 传输一个字节约 0.33us, 0x100000 次轮询 ≫ 任何正常字节的等待,
+ * 一旦 SPI3 外设被复位/时钟缺失/引脚被抢占, 纯 while 会永久占住调用任务
+ * (最坏情况: 持着 xFlashMutex 死等 → 整个存储子系统 + 看门狗一起崩)。 */
+#define SPI3_BYTE_TIMEOUT   0x100000UL
+
+/* W25Q128 数据手册给出的操作上限(留足余量)。
+ * 页编程 typ 0.7ms / max 3ms、扇区擦除 typ 45ms / max 400ms、整片擦除 max 200s。 */
+#define W25QXX_WRITE_TIMEOUT_MS         100
+#define W25QXX_ERASE_SECTOR_TIMEOUT_MS  5000
+#define W25QXX_ERASE_CHIP_TIMEOUT_MS    240000UL
+
 //SPI3 读写一个字节
 static uint8_t SPI3_ReadWriteByte(uint8_t TxData)
 {
-    while (SPI_I2S_GetFlagStatus(SPI3, SPI_I2S_FLAG_TXE) == RESET) {} //等待发送缓冲区为空(TXE=1)再写入
+    uint32_t timeout = SPI3_BYTE_TIMEOUT;
+    while (SPI_I2S_GetFlagStatus(SPI3, SPI_I2S_FLAG_TXE) == RESET)
+    {
+        if (--timeout == 0) { SPI3_NSS_HIGH(); return 0xFF; } // 超时: 放片选, 返回空闲态电平
+    }
     SPI_I2S_SendData(SPI3, TxData);   //通过外设SPIx发送一个数据
-    while (SPI_I2S_GetFlagStatus(SPI3, SPI_I2S_FLAG_RXNE) == RESET) {} //等待接收缓冲区非空(RXNE=1)再读取
+    timeout = SPI3_BYTE_TIMEOUT;
+    while (SPI_I2S_GetFlagStatus(SPI3, SPI_I2S_FLAG_RXNE) == RESET)
+    {
+        if (--timeout == 0) { SPI3_NSS_HIGH(); return 0xFF; }
+    }
     return SPI_I2S_ReceiveData(SPI3); //返回通过SPIx最近接收的数据        
 }
 
@@ -104,7 +125,7 @@ static uint32_t W25QXX_ReadID(void)
 
 // 内部函数声明
 static void W25QXX_Write_Enable(void);
-static void W25QXX_Wait_Busy(uint8_t query_interval);
+static uint8_t W25QXX_Wait_Busy(uint8_t query_interval, uint32_t timeout_ms);
 static void W25QXX_Erase_Sector_Internal(uint32_t Sector_Addr);
 static void W25QXX_Write_NoCheck(uint8_t* pBuffer,uint32_t WriteAddr,uint16_t NumByteToWrite);
 static void W25QXX_Read_Internal(uint8_t* pBuffer, uint32_t ReadAddr, uint32_t NumByteToRead);
@@ -245,24 +266,68 @@ void DMA1_Stream5_IRQHandler(void)
         portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
     }
 }
-// 等待DMA传输完成
-static void SPI3_DMA_Wait_Complete(void)
+/* DMA 传输等待上限(ms)。4KB 数据在 24MHz SPI 下约 1.4ms, 给 100ms 极宽裕;
+ * 真正的意义是: DMA 流被抢占/配置错误时不再永久阻塞持锁任务。 */
+#define SPI3_DMA_TIMEOUT_MS     100
+
+// 等待DMA传输完成 0-成功 1-超时(已复位DMA流, 调用方需放弃本次传输)
+static uint8_t SPI3_DMA_Wait_Complete(void)
 {
-    xSemaphoreTake(xFlashSemaphore,portMAX_DELAY);//等待RX(Sream0)传输完成
-    xSemaphoreTake(xFlashSemaphore,portMAX_DELAY);//等待TX(Sream5)传输完成
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(SPI3_DMA_TIMEOUT_MS);
+    uint8_t got = 0;
+
+    /* 不能无限等待: 只要 TC 中断没来(流被抢占、NVIC 被屏蔽、
+     * 传输错误标志置位而 TC 不置位), 调用任务就永久阻塞 —— 而且此时它还
+     * 持着 xFlashMutex, 导致 kvdb/log/字体全部跟着死锁。改成带截止时间等待。 */
+    while (got < 2)
+    {
+        TickType_t now = xTaskGetTickCount();
+        TickType_t left;
+        if ((int32_t)(deadline - now) <= 0) break;      // 已超时
+        left = deadline - now;
+        if (xSemaphoreTake(xFlashSemaphore, left) != pdTRUE) break;
+        got++;
+    }
+
+    if (got < 2)
+    {
+        // 超时: 关掉两条流并清标志, 把信号量计数还回原状, 避免污染下一次传输
+        DMA_Cmd(DMA1_Stream0, DISABLE);
+        DMA_Cmd(DMA1_Stream5, DISABLE);
+        SPI_I2S_DMACmd(SPI3, SPI_I2S_DMAReq_Rx | SPI_I2S_DMAReq_Tx, DISABLE);
+        while (xSemaphoreTake(xFlashSemaphore, 0) == pdTRUE) { }
+        DMA_ClearFlag(DMA1_Stream0, DMA_FLAG_TCIF0|DMA_FLAG_TEIF0|DMA_FLAG_DMEIF0|DMA_FLAG_FEIF0);
+        DMA_ClearFlag(DMA1_Stream5, DMA_FLAG_TCIF5|DMA_FLAG_TEIF5|DMA_FLAG_DMEIF5|DMA_FLAG_FEIF5);
+        SPI3_NSS_HIGH();
+        return 1;
+    }
     
-    // 等待SPI传输完成
-    while(SPI_I2S_GetFlagStatus(SPI3, SPI_I2S_FLAG_BSY) == SET) {} //等待SPI空闲(BSY清0)
+    // 等待SPI传输完成(同样加超时, 防止 BSY 因外设异常永不下降)
+    {
+        uint32_t timeout = SPI3_BYTE_TIMEOUT;
+        while(SPI_I2S_GetFlagStatus(SPI3, SPI_I2S_FLAG_BSY) == SET)
+        {
+            if (--timeout == 0) break;
+        }
+    }
 
     // 清除DMA中断标志
     DMA_ClearITPendingBit(DMA1_Stream0,DMA_IT_HTIF0|DMA_IT_TEIF0|DMA_IT_DMEIF0|DMA_IT_FEIF0);
     DMA_ClearITPendingBit(DMA1_Stream5,DMA_IT_HTIF5|DMA_IT_TEIF5|DMA_IT_DMEIF5|DMA_IT_FEIF5);
+    return 0;
 }
 
-// 等待W25QXX空闲 query_interval: 查询间隔(ms), 0表示不延时查询
-static void W25QXX_Wait_Busy(uint8_t query_interval)
+/* 等待W25QXX空闲。返回值: 0-完成 1-超时。
+ * query_interval: 查询间隔(ms), 0 表示不延时查询
+ * timeout_ms: 总超时; 0 表示不限(仅用于已知不会过长且必须等完的场景)
+ * 必须有总超时: 芯片被静电打坏/供电跌落导致 WIP 位永远为 1 时, 调用者
+ * 持着 xFlashMutex 永久空转, 现在启用 IWDG 后这种路径会被复位, 但没有现场
+ * 且可能反复重启 —— 这里改成明确超时, 让上层得到可处理的错误。 */
+static uint8_t W25QXX_Wait_Busy(uint8_t query_interval, uint32_t timeout_ms)
 {
     uint8_t status;
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+
     do 
     {
         SPI3_NSS_LOW();
@@ -270,8 +335,17 @@ static void W25QXX_Wait_Busy(uint8_t query_interval)
         status = SPI3_ReadWriteByte(0xFF);
         SPI3_NSS_HIGH();
         
-        if((status&0x01) && query_interval) Delay_ms(query_interval);
+        if(status & 0x01)
+        {
+            /* 擦除/整片擦除可能远超看门狗周期: 等待期间必须喂狗, 否则 3.7s
+             * 后复位, 结果是"每次擦芯片都重启"。 */
+            IWDG_FEED_SAFE();
+            if (query_interval) Delay_ms(query_interval);
+            if (timeout_ms != 0 && (int32_t)(xTaskGetTickCount() - deadline) >= 0)
+                return 1;   // 超时
+        }
     } while(status & 0x01);
+    return 0;
 }
 //W25QXX写使能 
 static void W25QXX_Write_Enable(void)   
@@ -317,8 +391,12 @@ static void W25QXX_Read_Internal(uint8_t* pBuffer, uint32_t ReadAddr, uint32_t N
             // 使能SPI DMA - 修改为SPI3
             SPI_I2S_DMACmd(SPI3, SPI_I2S_DMAReq_Rx | SPI_I2S_DMAReq_Tx, ENABLE);
 
-            // 等待传输完成
-            SPI3_DMA_Wait_Complete();
+            // 等待传输完成(超时就放弃剩余数据, 已读部分保留)
+            if (SPI3_DMA_Wait_Complete())
+            {
+                SPI3_NSS_HIGH();
+                return;
+            }
         }
         else
         {
@@ -366,8 +444,12 @@ static void W25QXX_Write_Page(uint8_t* pBuffer,uint32_t WriteAddr,uint16_t NumBy
         // 使能SPI DMA
         SPI_I2S_DMACmd(SPI3, SPI_I2S_DMAReq_Rx | SPI_I2S_DMAReq_Tx, ENABLE);
 
-        // 等待传输完成
-        SPI3_DMA_Wait_Complete();
+        // 等待传输完成(超时不重试: 写失败由 W25QXX_Wait_Busy 之后的校验/上层决定)
+        if (SPI3_DMA_Wait_Complete())
+        {
+            SPI3_NSS_HIGH();
+            return;
+        }
     }
     else
     {
@@ -377,7 +459,7 @@ static void W25QXX_Write_Page(uint8_t* pBuffer,uint32_t WriteAddr,uint16_t NumBy
     }
     
     SPI3_NSS_HIGH();                           //取消片选 
-    W25QXX_Wait_Busy(1);
+    W25QXX_Wait_Busy(1, W25QXX_WRITE_TIMEOUT_MS);   // 页编程最大 3ms, 给足 100ms
 }
 // 无检验写（假定目标区域已擦除），自动跨页 pBuffer:数据存储区地址  WriteAddr:开始写入地址(0~65535)  NumByteToWrite:要写入的字节数
 static void W25QXX_Write_NoCheck(uint8_t* pBuffer,uint32_t WriteAddr,uint16_t NumByteToWrite)   
@@ -411,7 +493,7 @@ static void W25QXX_Erase_Sector_Internal(uint32_t Sector_Addr)
     SPI3_ReadWriteByte((uint8_t)((Sector_Addr)>>8));   
     SPI3_ReadWriteByte((uint8_t)Sector_Addr);  
     SPI3_NSS_HIGH();                            			//取消片选                  
-    W25QXX_Wait_Busy(5);                       			//等待擦除完成
+    W25QXX_Wait_Busy(5, W25QXX_ERASE_SECTOR_TIMEOUT_MS);	//等待擦除完成(扇区擦除最大 400ms)
 }
 
 // 擦除整个芯片
@@ -421,7 +503,7 @@ static void W25QXX_Erase_Chip_Internal(void)
     SPI3_NSS_LOW();                        //使能器件   
     SPI3_ReadWriteByte(W25X_ChipErase);    //发送片擦除命令  
     SPI3_NSS_HIGH();                        //取消片选                  
-    W25QXX_Wait_Busy(200);                 //等待芯片擦除结束
+    W25QXX_Wait_Busy(200, W25QXX_ERASE_CHIP_TIMEOUT_MS);  //等待芯片擦除结束(W25Q128 最大 200s, 期间喂狗)
 }
 
 //磨损均衡核心逻辑 保持Scratch区的循环使用，避免频繁擦写同一扇区导致Flash寿命缩短

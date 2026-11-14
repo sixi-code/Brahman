@@ -509,7 +509,7 @@ static void btn_music_close_event_cb(lv_event_t * e)
 	if (Page_Get_Current() == PAGE_MUSIC) {
 		Page_Request_Switch(PAGE_DESKTOP);
 	}
-	Music_Status = Song_Error; // 使用 Song_Error 使音频任务正常回收内存资源
+	Music_Request(Song_Error); // 使用 Song_Error 使音频任务正常回收内存资源(经安全点提交)
 	Remove_Control_Center();
 }
 

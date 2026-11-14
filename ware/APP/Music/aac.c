@@ -266,21 +266,23 @@ uint8_t aac_play_song_prepare(uint8_t* fname)
  	aacctrl=malloc_bsc(sizeof(__aacctrl));// AAC控制结构体
 	aac_buffer = malloc_bsc(AAC_FILE_BUF_SZ); 	// 申请解码buf大小
 	music_ctrl.file=(FIL*)malloc_bsc(sizeof(FIL));// 文件对象
+	/* 分配成功即清零, 否则失败路径的 f_close() 会读到垃圾 fs 指针 */
+	if(music_ctrl.file) memset(music_ctrl.file, 0, sizeof(FIL));
 	music_ctrl.i2sbuf1=malloc_bsc(2048*2*sizeof(uint16_t));// I2S DMA 缓冲区1(ping)
 	music_ctrl.i2sbuf2=malloc_bsc(2048*2*sizeof(uint16_t));// I2S DMA 缓冲区2(pong)
 	music_ctrl.tbuf=malloc_bsc(2048*2*sizeof(uint16_t));// 临时解码输出缓冲区
 	
 	if(!aacctrl||!aac_buffer||!music_ctrl.file||!music_ctrl.i2sbuf1||!music_ctrl.i2sbuf2||!music_ctrl.tbuf)// 内存申请失败
 	{
-		free_bsc(aacctrl);
-		free_bsc(aac_buffer);
-		free_bsc(music_ctrl.file);
-		free_bsc(music_ctrl.i2sbuf1);
-		free_bsc(music_ctrl.i2sbuf2);
-		free_bsc(music_ctrl.tbuf); 
+		/* 释放后置 NULL: 下面统一失败路径还会 f_close()/free_bsc() 这些指针 */
+		free_bsc(aacctrl);           aacctrl = NULL;
+		free_bsc(aac_buffer);        aac_buffer = NULL;
+		free_bsc(music_ctrl.file);   music_ctrl.file = NULL;
+		free_bsc(music_ctrl.i2sbuf1); music_ctrl.i2sbuf1 = NULL;
+		free_bsc(music_ctrl.i2sbuf2); music_ctrl.i2sbuf2 = NULL;
+		free_bsc(music_ctrl.tbuf);   music_ctrl.tbuf = NULL;
 		res = 1;
 	}
-	else memset(music_ctrl.file, 0, sizeof(FIL)); 
 	if(res==0)
 	{
 		memset(music_ctrl.i2sbuf1,0,2048*2*sizeof(uint16_t));	// 数据清零 
@@ -312,9 +314,12 @@ uint8_t aac_play_song_prepare(uint8_t* fname)
 	// 准备失败时收尾(关闭并释放文件对象)
 	if(res)
 	{
-		f_close(music_ctrl.file);
-		free_bsc(music_ctrl.file); 
-		music_ctrl.file = NULL;
+		if(music_ctrl.file)   // 分配失败路径已置 NULL, 不能重复 f_close
+		{
+			f_close(music_ctrl.file);
+			free_bsc(music_ctrl.file); 
+			music_ctrl.file = NULL;
+		}
 	}
 	return res;
 }

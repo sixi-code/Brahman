@@ -120,7 +120,14 @@ uint8_t RTC_Clock_Init(void)
 		RTC_WaitForSynchro();
 	}
 	
-	err_flag = RTC_Clock_Update();
-	
+	/* 这一行若不判断就会把上面的 err_flag 整个覆盖掉:
+	 * LSE 起振失败(err_flag=1) 之后 RTC_Clock_Update() 正常返回 0,
+	 * 于是"时钟初始化失败"对外表现为成功 —— 之后所有时间戳都是错的。
+	 * 只在 Update 本身出错且尚未记录失败时才升级错误码。 */
+	{
+		uint8_t upd = RTC_Clock_Update();
+		if (!err_flag) err_flag = upd;
+	}
+
 	return err_flag;
 }

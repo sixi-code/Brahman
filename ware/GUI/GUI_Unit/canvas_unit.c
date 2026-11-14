@@ -217,12 +217,18 @@ static void save_history_step(void)
     history_buf[history_idx] = (lv_color_t *)malloc_bsc(buf_size);
     if (history_buf[history_idx] != NULL) {
         memcpy(history_buf[history_idx], canvas_buf, buf_size);
+    } else {
+        // 存不下就退回去: 保持 history_idx 指向"最后一步有效快照", 避免出现空洞槽位
+        history_idx--;
+        history_max = history_idx;
     }
 }
 
 static void undo_step(void)
 {
     if (history_idx > 0) {
+        // 该步当初可能因内存不足没能存下来(槽位为 NULL), 此时不能撤, 否则 memcpy 空指针
+        if (history_buf[history_idx - 1] == NULL) return;
         history_idx--;
         uint32_t buf_size = LV_CANVAS_BUF_SIZE_TRUE_COLOR(CANVAS_WIDTH, CANVAS_HEIGHT);
         memcpy(canvas_buf, history_buf[history_idx], buf_size);
@@ -234,6 +240,8 @@ static void undo_step(void)
 static void redo_step(void)
 {
     if (history_idx < history_max) {
+        // 同上: 槽位可能为空
+        if (history_buf[history_idx + 1] == NULL) return;
         history_idx++;
         uint32_t buf_size = LV_CANVAS_BUF_SIZE_TRUE_COLOR(CANVAS_WIDTH, CANVAS_HEIGHT);
         memcpy(canvas_buf, history_buf[history_idx], buf_size);
@@ -572,7 +580,10 @@ static void canvas_name_dlg_cancel_cb(lv_event_t * e)
 // 取消本次离开: 把切换目标改回当前页
 static void canvas_abort_switch(void)
 {
-	Page_Request_Switch(Page_Get_Current());
+	/* 不能写成 Page_Request_Switch(Page_Get_Current()):
+	 * PAGE_CANVAS 分支会调 page_arg_set(&page_pick_name, NULL),
+	 * 把用户已经输好的画作名清成空串 —— "取消退出"顺手把名字丢了。 */
+	Page_Cancel_Switch();
 }
 
 // 把当前画布按已有的画作名写回 SD, 返回 CANVAS_FILE_*
@@ -664,6 +675,13 @@ static void canvas_ask_dlg_event_cb(lv_event_t * e)
 bool Canvas_Unit_Can_Exit(void)
 {
 	if (!canvas_dirty || canvas_exit_ok) return true;
+
+	/* 自愈: dlg 指针非空但对象其实已经被删/被顶掉时, 本函数会永远拦下切换,
+	   而弹窗又不在了 —— 用户看到的是"按后退没反应且没有对话框"。 */
+	if (dlg != NULL && !lv_obj_is_valid(dlg)) {
+		dlg = NULL;
+		canvas_ask = CANVAS_ASK_NONE;
+	}
 
 	if (dlg == NULL) {// 还没弹过
 		canvas_ask = CANVAS_ASK_LEAVE;

@@ -5,6 +5,7 @@
  */
 #include "usbd_core.h"
 #include "usbd_display.h"
+#include "usbd_display_conf.h"   // usb_display_deinit 声明, 供初始化失败时回退
 #include "FreeRTOS.h"
 #include "semphr.h"
 #include "malloc.h"
@@ -116,6 +117,7 @@ void usb_display_init(uint8_t busid, uintptr_t reg_base)
 {
 	g_lcd_user = LCD_USER_DISP;
 	Taskmanager_Ctrl(Task_N_LVGL, Task_T_Suspend, 0);
+	Taskmanager_Wait_Suspended(Task_N_LVGL, 500);// 等 LVGL 真挂起再动显存, 见 media_task.c
 	Page_Push_History(Page_Get_Current());
 	lv_port_disp_deinit();
 	Page_Request_Switch(PAGE_DISPLAY);
@@ -123,7 +125,15 @@ void usb_display_init(uint8_t busid, uintptr_t reg_base)
     for (int i = 0; i < DISPLAY_CHUNK_COUNT; i++) 
 	{
         frame_pool[i].frame_buf = (uint8_t *)malloc_bsc(DISPLAY_CHUNK_SIZE);
-        if (frame_pool[i].frame_buf == NULL) {while(1);}
+        if (frame_pool[i].frame_buf == NULL) {
+            /* 4 块 8KB 共 32KB, 副屏开启时若 BSC 池不够就整体回退:
+               不能死等, 否则连带 LVGL 一起被挂在这一帧上 */
+            for (int k = 0; k < i; k++) {
+                if (frame_pool[k].frame_buf) { free_bsc(frame_pool[k].frame_buf); frame_pool[k].frame_buf = NULL; }
+            }
+            usb_display_deinit();      // 恢复 LVGL 显示与页面
+            return;
+        }
         frame_pool[i].frame_bufsize = DISPLAY_CHUNK_SIZE;
     }
 
@@ -136,8 +146,7 @@ void usb_display_init(uint8_t busid, uintptr_t reg_base)
 void usb_display_deinit(void)
 {
 	g_lcd_user = LCD_USER_LVGL;
-	lv_port_disp_reinit();
-	if (lv_scr_act() != NULL) lv_obj_invalidate(lv_scr_act());
+	g_lvgl_disp_reinit_req = 1;// 由 Lvgl_Task 在安全点重建显存并重绘
 	Taskmanager_Ctrl(Task_N_LVGL, Task_T_Resume, 0);
 	Page_Back();
 	
@@ -174,6 +183,22 @@ void usb_display_task(void)
     if (frame->is_sof) 
 	{
         struct usbd_disp_frame_header *header = (struct usbd_disp_frame_header *)data_ptr;
+
+        /* 主机下发的 header 完全不受信: 帧长度不足时 data_len -= sizeof(header)
+           会让 uint32_t 下溢成 ~4G, 直接让 DMA 搬穿整个内存; 坐标越界则把 LCD
+           窗口设到屏幕外. 这里先校验, 不合法就丢弃该帧并回队. */
+        if (data_len < sizeof(struct usbd_disp_frame_header)) {
+            usbd_display_enqueue(frame);
+            return;
+        }
+        if (header->x >= LCD_W || header->y >= LCD_H ||
+            header->width == 0 || header->height == 0 ||
+            (uint32_t)header->x + header->width  > LCD_W ||
+            (uint32_t)header->y + header->height > LCD_H) {
+            usbd_display_enqueue(frame);
+            return;
+        }
+
         LCD_Address_Set(header->x, header->y, header->x + header->width - 1, header->y + header->height - 1);
         data_ptr += sizeof(struct usbd_disp_frame_header);
         data_len -= sizeof(struct usbd_disp_frame_header);

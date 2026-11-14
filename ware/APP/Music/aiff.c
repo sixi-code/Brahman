@@ -311,12 +311,14 @@ uint8_t aiff_play_song_prepare(uint8_t* fname)
     // 内存分配
     // 内存分配(文件对象 + 双 DMA 缓冲 + 临时缓冲)
     music_ctrl.file    = (FIL*)malloc_bsc(sizeof(FIL));// 文件对象
+    /* 分配成功就立刻清零, 不能等四块都成功:
+     * 否则部分分配失败时 cleanup 的 f_close() 会拿垃圾 fs 指针去校验。 */
+    if (music_ctrl.file) memset(music_ctrl.file, 0, sizeof(FIL));
     music_ctrl.i2sbuf1 = malloc_bsc(AIFF_I2S_TX_DMA_BUFSIZE);// I2S DMA 缓冲区1(ping)
     music_ctrl.i2sbuf2 = malloc_bsc(AIFF_I2S_TX_DMA_BUFSIZE);// I2S DMA 缓冲区2(pong)
     music_ctrl.tbuf    = malloc_bsc(AIFF_I2S_TX_DMA_BUFSIZE);// 临时读取缓冲区
 	
     if (!music_ctrl.file || !music_ctrl.i2sbuf1 || !music_ctrl.i2sbuf2 || !music_ctrl.tbuf) res = 1;
-	else memset(music_ctrl.file, 0, sizeof(FIL)); 
     
 	if (!res) res = aiff_decode_init(fname, &aiffctrl); // 解析文件信息
     

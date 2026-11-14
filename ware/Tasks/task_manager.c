@@ -55,6 +55,33 @@ void Taskmanager_Ctrl(uint8_t task_num, uint8_t task_action, uint8_t IsFromISR)
 }
 
 /**
+ * @brief 等待某个任务真正进入挂起态
+ * @param task_num 任务编号 (Task_N_xxx)
+ * @param timeout_ms 最长等待时间
+ * @return 0-已挂起 1-超时
+ *
+ * Taskmanager_Ctrl(Task_T_Suspend) 只是把动作写进状态变量 + Give 信号量,
+ * 真正的 vTaskSuspend 由 Task_Manager 稍后执行。调用方若紧接着释放该任务正在
+ * 使用的资源(比如 LVGL 的显存), 就会撞上"资源已释放但任务还在跑"的窗口。
+ * 所有这类调用点必须先等这个函数返回 0。
+ */
+uint8_t Taskmanager_Wait_Suspended(uint8_t task_num, uint32_t timeout_ms)
+{
+    TickType_t deadline;
+    if (task_num >= TASK_NUM_MAX) return 1;
+
+    deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    while (1)
+    {
+        TaskHandle_t h = *(Task_List[task_num].handle_ptr);
+        /* 句柄为空 = 任务本来就没了, 视为已挂起 */
+        if (h == NULL || eTaskGetState(h) == eSuspended) return 0;
+        if ((int32_t)(xTaskGetTickCount() - deadline) >= 0) return 1;
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+}
+
+/**
  * @brief 任务管理主线程
  */
 void Task_Manager( void * pvParameters )
@@ -80,12 +107,18 @@ void Task_Manager( void * pvParameters )
                         break;
                     }
                     if (*pHandle == NULL) {
-                        xTaskCreate(Task_List[i].task_func,
-                                    Task_List[i].task_name,
-                                    Task_List[i].stack_size,
-                                    NULL,
-                                    Task_List[i].priority,
-                                    pHandle);
+                        BaseType_t baseType = xTaskCreate(Task_List[i].task_func,
+                                                          Task_List[i].task_name,
+                                                          Task_List[i].stack_size,
+                                                          NULL,
+                                                          Task_List[i].priority,
+                                                          pHandle);
+                        if (baseType != pdPASS) {
+                            /* 创建失败(通常是 CCM 池不足): 保持空态, 绝不谎报 Running,
+                               否则后续 Suspend/Resume 判空跳过, 状态机永久说谎 */
+                            *(Task_List[i].status_ptr) = Task_P_Null;
+                            break;
+                        }
                     }
                     *(Task_List[i].status_ptr) = Task_P_Running;
                     break;

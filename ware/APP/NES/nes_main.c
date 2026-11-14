@@ -91,8 +91,11 @@ uint8_t nes_init(const char *path)
 	
 	if(!raw_nes_ram_ptr || !PRG_ROM_Cache || !VROM_banks || !nes_dma_buf || !ppu || !spr_ram || !RomHeader || !NES_Mapper || !NES_SRAM || !apu || !wave_buffers || !i2sbuf1 || !i2sbuf2)
 	{
+		/* NES_RAM 由 raw_nes_ram_ptr 对齐得到, 这里一并判空:
+		 * 分配失败时 NES_RAM 是野值, 下面的 memset(NES_RAM,0,0x800) 会写穿内存。 */
 		return 1; // 内存不足
 	}
+	if(NES_RAM == NULL) return 1;
     
 	memset(NES_RAM, 0, 0X800);
 	memset(NES_SRAM, 0, 0X2000); 
@@ -131,10 +134,15 @@ uint8_t nes_init(const char *path)
 		MapperNo=(RomHeader->flags_1>>4)|(RomHeader->flags_2&0xf0);
 		if(RomHeader->flags_2 & 0x0E) MapperNo=RomHeader->flags_1>>4; 
 		
-        uint8_t i;
-		for(i=0;i<255;i++) {		
-			if (MapTab[i]==MapperNo) break;		
-			if (MapTab[i]==-1) res=3; 
+        /* MapTab 只有 6 项有效内容(其余是 -1 结束标记), 扫描必须在此停下:
+         * 一旦 MapTab 里没有 -1 结束标记(或 MapperNo 恰好命中尾部 -1),
+         * 循环会越界读 255 项; 且 res=3 只在命中 -1 时置位, 循环并不 break,
+         * 继续读完 200 多项垃圾。改成"遇到 -1 立即停", 只扫有效区。 */
+		uint8_t i;
+		res = 3;                          // 默认: 不支持的 mapper
+		for(i=0;i<255;i++) {
+			if (MapTab[i] == -1) break;   // 有效表项结束
+			if (MapTab[i] == MapperNo) { res = 0; break; }
 		} 
 		if(res==0)
 		{
@@ -155,6 +163,19 @@ uint8_t nes_init(const char *path)
 			}
 		}
 	} 
+	else
+	{
+		/* 后缀是 .nes 但文件头不是 "NES" 时必须置错误码, 否则 res 仍是 0,
+		 * 于是照样往下跑 Mapper_Init/PPU_reset/开 I2S —— 用户看到的是
+		 * 全黑画面 + CPU 占满, 还以为是模拟器慢。 */
+		res = 4;
+	}
+
+	/* 只有真正加载成功才初始化硬件。
+	 * 只有加载成功才初始化硬件: 失败时 Mapper_Init() 会调 NES_Mapper->Reset()
+	 * (NES_Mapper 可能为 NULL 或全 0), I2S DMA 也被启动, 之后 nes_deinit
+	 * 还得收拾半启动的硬件。 */
+	if (res != 0) return res;
 
 	Mapper_Init();						 
 	cpu6502_init();							  	 

@@ -129,7 +129,12 @@ static size_t in_func(JDEC *jd, uint8_t *buff, size_t nbyte) {
 
 // 将缓冲区内容刷新到 LCD 上，并更新缓冲区状态
 static void flush_line_buffer(void) {
-    if (buf_filled_lines == 0) return;
+    /* 空缓冲时也必须把窗口往前推。
+     * 空缓冲时直接 return 会让调用方的窗口推进循环无法前进:
+     *   while (y >= buf_start_y + BUF_LINES) flush_line_buffer();
+     * 在 buf_filled_lines==0 的情况下 buf_start_y 永不前进 → 死循环,
+     * media_task 卡死而 LVGL 已被挂起 → 黑屏, 只能断电。 */
+    if (buf_filled_lines == 0) { buf_start_y += BUF_LINES; return; }
     wait_video_dma_done();// 等待上一次 DMA 传输完成(并在此期间服务音频 DMA)
     LCD_Color_Fill(0, buf_start_y, LCD_WIDTH - 1, buf_start_y + buf_filled_lines - 1, line_buf[write_idx]);
     dma_busy = 1;
@@ -193,11 +198,17 @@ uint8_t video_avi_play_init(const char *file)
     if (f_read(&fil, header, 12, &br) != FR_OK || br != 12) goto err;
     if (header[0] != FOURCC('R','I','F','F') || header[2] != FOURCC('A','V','I',' ')) goto err;
 
-    while (1) {
+    /* 解析循环必须有界。
+     * 解析循环必须有界: 当 csize==0 时 align_size 也是 0,
+     * 随后的 f_lseek(f_tell + 0) 原地打转, 文件指针再也不前进 ——
+     * 函数永不返回, 上层 media_task 等不到 video_avi_play_init() 返回,
+     * 而 LVGL 已挂起、屏幕黑着, 只能断电。 */
+    for (uint32_t guard = 0; guard < 100000; guard++) {
         uint32_t chunk[2];// 读取下一个 chunk 的 ID 和大小
         if (f_read(&fil, chunk, 8, &br) != FR_OK || br != 8) break;
         uint32_t cid = chunk[0], csize = chunk[1];// 读取 chunk ID 和大小
         uint32_t align_size = (csize + 1) & ~1;// 对齐到偶数字节边界
+        uint32_t pos_before = f_tell(&fil);// 本 chunk 的起始位置(用于前进性检查)
 
         // 处理不同类型的 chunk
         if (cid == FOURCC('L','I','S','T')) {
@@ -214,6 +225,7 @@ uint8_t video_avi_play_init(const char *file)
                 continue; // 允许游标自然进入该 List 内部读取子组件
             }
             f_lseek(&fil, f_tell(&fil) + align_size - 4);
+            if (f_tell(&fil) <= pos_before) f_lseek(&fil, pos_before + 8); // 保证前进
             continue; 
         }
         // 处理 strh 块，确定当前流类型 (视频或音频)
@@ -246,6 +258,10 @@ uint8_t video_avi_play_init(const char *file)
         }
         // 如果当前流不是视频流或音频流，则跳过该 chunk
         else f_lseek(&fil, f_tell(&fil) + align_size);
+
+        /* 前进性检查: 任何分支(csize==0、align_size 算出来是 0、lseek 越界回落)
+         * 只要把文件指针留在原地, 就强制跳过 8 字节, 保证循环必定收敛。 */
+        if (f_tell(&fil) <= pos_before) f_lseek(&fil, pos_before + 8);
     }
     
     if (movi_offset == 0) goto err;
@@ -289,9 +305,18 @@ err:
 uint8_t video_avi_play_task(void) {
     if (!initialized) return 1;
 
+    /* 本函数只在"解出一帧"或"彻底失败"时才返回, 中间所有 continue 都在
+     * while(1) 内自旋。若 movi 区损坏(f_read 一直读不满 8B, 每次都 seek 回
+     * movi_offset), 就会永久自旋在这一层: audio_service 还在跑, 但 media_task
+     * 永远拿不到返回值 → 按键无响应、画面冻结, 只能断电。
+     * 用一个"连续空转次数"上限兜底, 超了就让调用方结束播放。 */
+    uint32_t idle_rounds = 0;
+
     while (1) {
         audio_service(); 
         
+        if (++idle_rounds > 200000UL) return 2;   // 约数秒无有效帧, 判为坏文件
+
         uint32_t chunk[2]; UINT br;
         if (f_read(&fil, chunk, 8, &br) != FR_OK || br != 8) {
             if (movi_offset != 0) {
@@ -308,6 +333,7 @@ uint8_t video_avi_play_task(void) {
         uint32_t align_size = (csize + 1) & ~1;
         uint8_t *id = (uint8_t*)&cid;
         uint32_t chunk_start_pos = f_tell(&fil);
+        idle_rounds = 0;   // 读到了有效 chunk, 重置空转计数
         // 处理 LIST 块，检查其类型是否为 movi 或 rec，如果是则继续解析其子块，否则跳过该 LIST 块
         if (cid == FOURCC('L','I','S','T')) {
             uint32_t list_type;
@@ -318,6 +344,7 @@ uint8_t video_avi_play_task(void) {
             }
             // 如果 LIST 块的类型不是 movi 或 rec，则跳过该 LIST 块
             f_lseek(&fil, chunk_start_pos + align_size);
+            if (f_tell(&fil) <= chunk_start_pos) f_lseek(&fil, chunk_start_pos + 8); // 防原地打转
             continue;
         }
 
@@ -417,6 +444,11 @@ uint8_t video_avi_play_task(void) {
         else {
             f_lseek(&fil, chunk_start_pos + align_size);
         }
+
+        /* 兜底前进性检查: csize==0 时 align_size 也是 0, 各分支的
+         * f_lseek(chunk_start_pos + 0) 会让文件指针原地不动 ——
+         * 表现为"画面卡在第 N 帧、按键无响应"。强制至少跳过 8 字节。 */
+        if (f_tell(&fil) <= chunk_start_pos) f_lseek(&fil, chunk_start_pos + 8);
     }
 }
 

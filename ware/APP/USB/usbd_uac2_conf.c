@@ -298,6 +298,15 @@ void usbd_audiov2_open(uint8_t busid, uint8_t intf)
 	uac2_dma_buf1 = malloc_bsc(AUDIO_DMA_PACKET);
 	uac2_usb_buf = malloc_bsc(AUDIO_DMA_PACKET); // 确保它足够大，能够进行 3字节至4字节的原位展开
 
+	// 任一缓冲申请失败就直接放弃本次 open: 否则下面的 memset 会解引用空指针
+	if (!uac2_audio_ring_buf || !uac2_dma_buf0 || !uac2_dma_buf1 || !uac2_usb_buf) {
+		if (uac2_audio_ring_buf) { free_bsc(uac2_audio_ring_buf); uac2_audio_ring_buf = NULL; }
+		if (uac2_dma_buf0) { free_bsc(uac2_dma_buf0); uac2_dma_buf0 = NULL; }
+		if (uac2_dma_buf1) { free_bsc(uac2_dma_buf1); uac2_dma_buf1 = NULL; }
+		if (uac2_usb_buf) { free_bsc(uac2_usb_buf); uac2_usb_buf = NULL; }
+		return;
+	}
+
     memset(uac2_audio_ring_buf, 0, AUDIO_BUF_NUM * AUDIO_DMA_PACKET);
     memset(uac2_dma_buf0, 0, AUDIO_DMA_PACKET);
     memset(uac2_dma_buf1, 0, AUDIO_DMA_PACKET);

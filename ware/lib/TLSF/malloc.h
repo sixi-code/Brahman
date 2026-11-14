@@ -19,6 +19,11 @@ typedef struct {
 // ===== TLSF 初始化 =====
 uint8_t tlsf_init(void);
 
+// ===== 分配失败统计 (供内存页预警: 非 0 即说明某次分配失败) =====
+extern volatile uint32_t g_malloc_fail_size;  // 最近一次失败的请求字节数
+extern volatile uint32_t g_malloc_fail_cnt;   // 失败累计次数
+
+
 // ===== BSC (Basic SRAM) 池相关函数 ===== 
 void *malloc_bsc(uint32_t bytes);
 void free_bsc(void* ptr);

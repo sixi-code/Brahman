@@ -313,12 +313,16 @@ uint8_t wav_play_song_prepare(uint8_t* fname)
     uint8_t res = 0;
     // 内存分配
     music_ctrl.file    = (FIL*)malloc_bsc(sizeof(FIL));
+    /* memset 必须在"分配成功就做", 不能挂在 else 分支上。
+     * 否则一旦某块(常有: 4×几KB DMA 缓冲)分配失败,
+     * FIL 里是上一首歌残留的堆垃圾, 而 cleanup 路径无条件 f_close() →
+     * FatFs 拿垃圾 fs 指针做校验 → HardFault。 */
+    if (music_ctrl.file) memset(music_ctrl.file, 0, sizeof(FIL));
     music_ctrl.i2sbuf1 = malloc_bsc(WAV_I2S_TX_DMA_BUFSIZE);
     music_ctrl.i2sbuf2 = malloc_bsc(WAV_I2S_TX_DMA_BUFSIZE);
     music_ctrl.tbuf    = malloc_bsc(WAV_I2S_TX_DMA_BUFSIZE);
 	
     if (!music_ctrl.file || !music_ctrl.i2sbuf1 || !music_ctrl.i2sbuf2 || !music_ctrl.tbuf) res = 1;
-	else memset(music_ctrl.file, 0, sizeof(FIL)); //初始化文件结构体为0，防止 cleanup 时 f_close 访问垃圾指针
 	if (!res) res = wav_decode_init(fname, &wavctrl); // 解析文件信息
 	if (!res) // 解析成功
 	{   

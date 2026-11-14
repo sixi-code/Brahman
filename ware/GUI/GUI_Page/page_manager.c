@@ -8,6 +8,8 @@
 #include <string.h>
 #include <stdarg.h>
 #include "malloc.h"
+#include "defines.h"
+#include "debug.h"      // debug_printf: 页面 init 失败要留一条可查的记录
 #include "file_page.h"
 #include "album_page.h"
 #include "music_page.h"
@@ -82,7 +84,8 @@ static volatile uint32_t current_page_id = PAGE_NONE;// 当前页面ID
 static volatile uint32_t next_page_id = PAGE_START;// 下一个页面ID
 
 // 页面传参缓冲区大小 (current_path 与 page_pick_name 共用)
-#define PAGE_ARG_BUF_MAX 256
+// 与 FILE_PATH_MAX 对齐, 否则装不下 NOTE_PATH_MAX(272) 的长路径
+#define PAGE_ARG_BUF_MAX FILE_PATH_MAX
 
 // 页面传参缓冲区的统一分配/填充: 首次用到才申请, 之后复用同一块
 // (current_path 与 page_pick_name 都定义在 variables.c, 由本函数统一分配)
@@ -149,6 +152,14 @@ void _Page_Request_Switch_Impl(uint32_t new_page_id, const char *path, ...)
     }
 }
 
+/* 只把目标页面拉回当前页面, 不碰页面传参缓冲。
+ * 用于 can_exit 拦下切换 / init 失败回退这类"本次切换作废"的场合。 */
+void Page_Cancel_Switch(void)
+{
+    next_page_id = current_page_id;
+    is_back_action = false;   // 取消不算后退, 历史栈保持不动
+}
+
 // 触发后退功能
 void Page_Back(void)
 {
@@ -193,10 +204,23 @@ void Page_Manager_Loop(void)
     // 切换前先询问当前页面是否允许离开(例如未保存的内容需要用户确认)
     // 被拦下时本帧不切换, 但仍继续执行下面的刷新逻辑, 让页面自己把确认弹窗处理完
     bool allow_switch = true;
+    static uint16_t block_ticks = 0;   // 被 can_exit 连续拦下的轮数(20ms/轮)
     if (current_page_id != target_next_id) {
         const Page_Interface_t* leaving_page = Page_Get_Interface(current_page_id);
         if (leaving_page && leaving_page->can_exit && !leaving_page->can_exit()) {
             allow_switch = false;
+            /* 被拦下后如果页面的确认弹窗自己也失效了(被别的对象盖住、
+             * 被 click_catcher 顶掉却没清 ask 标记), can_exit 会永远返回 false,
+             * LVGL 任务每 20ms 调一次、next_page_id 既不清也不作废 ——
+             * 用户按任何键都出不去, 只能断电。
+             * 约 3s 仍无明确表态就放弃这次切换, 让用户回到可操作状态。 */
+            if (++block_ticks > 150) {
+                next_page_id   = current_page_id;
+                is_back_action = false;
+                block_ticks    = 0;
+            }
+        } else {
+            block_ticks = 0;
         }
     }
 
@@ -233,6 +257,26 @@ void Page_Manager_Loop(void)
             if (page_states[target_next_id] == PAGE_STATE_UNINIT && next_page->init) {
                 next_page->init();
             }
+
+            /* OOM 失败的探测。
+             * 各页面 init 在 malloc_bsc/malloc_ccm 失败时都是"直接 return",
+             * 而此时原页面已经 exit 删完了对象, 活动屏幕上不会有任何子对象。
+             * 若此时仍标 ACTIVE, update() 会每帧照跑而页面空空 → 永久白屏。
+             * 判据用"活动屏幕子对象数 == 0": 所有会创建 UI 的页面都至少建 1 个
+             * 对象; init 为 NULL 的页面(游戏/媒体/副屏)不在此列。 */
+            if (next_page->init != NULL && lv_obj_get_child_cnt(lv_scr_act()) == 0) {
+                page_states[target_next_id] = PAGE_STATE_UNINIT;
+                next_page_id = current_page_id;          // 撤销本次切换请求
+                debug_printf("page %u init failed (no widget), stay at %u\r\n",
+                             (unsigned)target_next_id, (unsigned)current_page_id);
+                if (current_page && current_page->init) { // 把原页面重建回来, 不留白屏
+                    current_page->init();
+                    if (lv_obj_get_child_cnt(lv_scr_act()) > 0)
+                        page_states[current_page_id] = PAGE_STATE_ACTIVE;
+                }
+                return;
+            }
+
             page_states[target_next_id] = PAGE_STATE_ACTIVE;
         }
         

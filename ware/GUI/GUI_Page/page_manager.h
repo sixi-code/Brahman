@@ -76,6 +76,12 @@ void _Page_Request_Switch_Impl(uint32_t new_page_id, const char *path, ...);
 // 列表页 -> 编辑页 传递"选中条目名"的变量 (定义在 variables.c, 与 current_path 并列):
 // 由本模块的 page_arg_set() 按需申请并填充, 页面侧只读取(不要改写, 也不要释放)
 
+/* 取消本次页面切换请求 (把 next_page 拉回 current_page)。
+ * 不能用 Page_Request_Switch(Page_Get_Current()) 代替: 那会走一遍传参逻辑,
+ * PAGE_NOTE/PAGE_CANVAS 会用 path=NULL 调用 page_arg_set, 把用户刚输入的
+ * 画作名/笔记名清成空串。切页失败的场景一律用这个函数。 */
+void Page_Cancel_Switch(void);
+
 // 后退与历史管理函数
 void Page_Back(void);
 void Page_Clear_History(void);

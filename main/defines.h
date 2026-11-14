@@ -25,6 +25,11 @@
 #define FILEOP_RES_FAIL  1 // 失败
 #define FILEOP_RES_NO_SD 2 // SD卡不可用 (没插卡, 或卷被 USB 虚拟U盘占用)
 
+// 通用完整路径缓冲区大小。
+// 必须 >= NOTE_PATH_MAX: 文件管理器的 current_path 与页面传参缓冲区共用这一尺寸,
+// 小于 272 时长路径会被静默截断或写越界。
+#define FILE_PATH_MAX  272
+
 //定义 记事本 (note_list_unit / note_unit 共用)
 #define NOTE_DIR_PATH  "0:/Note"   // 笔记目录
 #define NOTE_EXT       ".txt"      // 笔记后缀 (用它区分哪些文件是笔记)
@@ -104,8 +109,11 @@
 //USB主机PSC线程 优先级5
 
 //音乐任务
+// 注: 栈单位是 4 字节 word(configSTACK_DEPTH_TYPE=uint16_t), 1024 = 4KB。
+// build/Target_1/Brahman.htm 里 Music_Task 的静态栈深是 4960B 且不含 stb_vorbis 的
+// Unknown 部分, 原 4KB 播 OGG 必然踩穿, 这里扩到 8KB。
 #define MUSIC_PRIO         6
-#define MUSIC_STACK_SIZE   1024
+#define MUSIC_STACK_SIZE   2048
 
 //任务管理器
 #define TASK_MANAGER_PRIO         7

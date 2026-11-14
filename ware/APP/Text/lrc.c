@@ -31,6 +31,10 @@ bool lrc_decoder_open(lrc_decoder_t *decoder, const char *filepath, uint32_t max
     decoder->max_lines = max_lines;
 
     // 分配文本读取缓冲区 (+1 为了末尾放 \0)
+    // 先清零字段, 保证任何失败路径上 lrc_decoder_close() 看到的都是合法空指针
+    decoder->text_buf = NULL;
+    decoder->lines    = NULL;
+    decoder->line_count = 0;
     decoder->text_buf = (char *)malloc_bsc(decoder->buf_size + 1);
     if (decoder->text_buf == NULL) {
         f_close(&decoder->file);
@@ -48,6 +52,11 @@ bool lrc_decoder_open(lrc_decoder_t *decoder, const char *filepath, uint32_t max
 
     UINT br;
     if (f_read(&decoder->file, decoder->text_buf, decoder->buf_size, &br) != FR_OK || br == 0) {
+        /* lrc_decoder_close() 只释放堆缓冲, 不会 f_close, 这里要自己关。
+         * 缺这一步时每次歌词读取失败(空文件/坏扇区/卡抖动)
+         * 都留下一个打开的 FIL 句柄, FatFs 的 _FS_LOCK 用尽后
+         * 整个系统再也打不开任何文件(音乐/图片/笔记全挂)。 */
+        f_close(&decoder->file);
         lrc_decoder_close(decoder);
         return false;
     }

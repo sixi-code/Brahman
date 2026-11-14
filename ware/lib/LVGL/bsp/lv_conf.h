@@ -234,8 +234,14 @@
 #define LV_USE_ASSERT_OBJ           0   /*检查对象的类型和存在性（例如未删除）。（慢）*/
 
 /*当断言发生时添加自定义处理程序，例如重启MCU*/
+/* 不能是 while(1): LVGL 任务会被永久钉死, 且 LV_USE_LOG=0 时一个字都不输出,
+ * 现场只剩"黑屏+不复位", 无从定位。改为回调项目侧钩子:
+ * 钩子把 文件/行号 写进 RTC 备份寄存器并软复位, 下次启动由 Start_Task 记进日志。 */
 #define LV_ASSERT_HANDLER_INCLUDE <stdint.h>
-#define LV_ASSERT_HANDLER while(1);   /*默认情况下暂停*/
+void lvgl_assert_hook(const char * file, uint32_t line);
+/* 注意: lv_assert.h 的调用点写成 "LV_ASSERT_HANDLER" 后面没有分号,
+ * 所以宏必须自带分号(与原 while(1); 同形式), 不能用 do{}while(0)。 */
+#define LV_ASSERT_HANDLER lvgl_assert_hook(__FILE__, __LINE__);
 
 /*-------------
  * 其他

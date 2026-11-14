@@ -70,8 +70,20 @@ uint8_t Decode_BMP_Picture(const char *path)
             break;
         }
         
-        uint32_t w = info_h.biWidth;// BMP 宽度
-        uint32_t h = abs(info_h.biHeight);// BMP 高度
+        /* 头部字段一律当不可信输入。
+         * 头部字段一律当不可信输入: 负宽(-1)会变成 0xFFFFFFFF, 于是
+         * row_bytes=(w*bitcount+31)/32*4 巨值溢出、pixels_to_read 溢出、
+         * file_offset=bfOffBits+src_y*row_bytes+... 三重溢出, malloc_bsc 拿到
+         * 一个荒唐的大小, f_lseek 到无效位置后 f_read 把数据写到错处。
+         * 这里做"合理范围"限制: 宽高 1..4096, 位深 16/24/32, bfOffBits < 文件长度。 */
+        if (info_h.biWidth <= 0 || info_h.biWidth > 4096 ||
+            info_h.biHeight == 0 || info_h.biHeight > 4096 ||
+            info_h.biHeight < -4096) { ret = 1; break; }
+        if (info_h.biBitCount != 16 && info_h.biBitCount != 24 && info_h.biBitCount != 32) { ret = 1; break; }
+        if (file_h.bfOffBits >= f_size(&fil)) { ret = 1; break; }
+
+        uint32_t w = (uint32_t)info_h.biWidth;// BMP 宽度
+        uint32_t h = (uint32_t)(info_h.biHeight > 0 ? info_h.biHeight : -info_h.biHeight);// BMP 高度
         uint8_t bottom_up = (info_h.biHeight > 0);// BMP 图像数据是否自下而上存储
 
         // 计算缩放比例和裁剪区域
@@ -123,7 +135,12 @@ uint8_t Decode_BMP_Picture(const char *path)
             int32_t img_x_start = crop_left - offset_x;// 计算裁剪区域的起始列在 BMP 图像中的位置
             int32_t src_x_start = img_x_start * scale;// 计算裁剪区域的起始列在 BMP 源数据中的位置
 
-            uint32_t file_offset = file_h.bfOffBits + src_y * row_bytes + src_x_start * bytes_per_pixel;// 计算文件偏移量
+            /* 偏移量本身再核一次: 即使宽高合法, src_y/row_bytes 的组合也可能
+             * 落到文件之外(截断的 BMP)。越界的 f_lseek 会让 f_read 返回 0,
+             * 而 src_buf 里是上一行的残留像素 → 画面撕裂而不是报错。 */
+            if (src_y < 0) continue;
+            uint32_t file_offset = file_h.bfOffBits + (uint32_t)src_y * row_bytes + (uint32_t)src_x_start * bytes_per_pixel;// 计算文件偏移量
+            if (file_offset >= f_size(&fil)) continue;
             if (f_lseek(&fil, file_offset) == FR_OK) {
                 f_read(&fil, src_buf, bytes_to_read, &br);
                 

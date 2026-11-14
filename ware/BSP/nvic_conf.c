@@ -3,7 +3,18 @@
 void Nvic_Init(void)
 {
 	NVIC_PriorityGroupConfig(NVIC_PriorityGroup_4);
-	
+
+	/* 先把所有中断的优先级都压到最低(0xFF)。
+	 * 复位值是 0 —— 也就是"最高优先级, 高于 configMAX_SYSCALL_INTERRUPT_PRIORITY"。
+	 * 本工程在别处(EXTI/USART/I2C 等)有直接调 NVIC_EnableIRQ 却不设优先级的地方,
+	 * 那些中断一旦在里面调用任何 FreeRTOS 的 FromISR API, 会命中
+	 * configASSERT(ucCurrentPriority >= ucMaxSysCallPriority) 并把中断永久关掉;
+	 * 即使不调 API, 优先级 0 也能抢占 SysTick, 让调度节拍漂移。
+	 * 下面会逐个把用到的通道设成实际需要的优先级。 */
+	for (uint32_t i = 0; i < (sizeof(NVIC->IP) / sizeof(NVIC->IP[0])); i++) {
+		NVIC->IP[i] = 0xFF;
+	}
+
 	//系统滴答定时器中断优先级为6
 	NVIC_SetPriority(SysTick_IRQn, 6);
 

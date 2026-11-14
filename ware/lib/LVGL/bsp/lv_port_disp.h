@@ -31,6 +31,7 @@ extern "C" {
  **********************/
 void lv_port_disp_init(void);
 void lv_port_disp_deinit(void);
+uint8_t lv_port_disp_wait_idle(uint32_t timeout_ms);
 void lv_port_disp_reinit(void);
 
 /**********************

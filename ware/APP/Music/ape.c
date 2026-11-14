@@ -122,12 +122,21 @@ uint8_t ape_play_song_prepare(uint8_t* fname)
 	decoded1=malloc_bsc(APE_BLOCKS_PER_LOOP*4);// 解码输出块1
 	
 	music_ctrl.file=(FIL*)malloc_bsc(sizeof(FIL));// 文件对象
+	/* 分配成功即清零, 失败路径的 f_close() 才不会拿垃圾 fs 指针去校验 */
+	if(music_ctrl.file) memset(music_ctrl.file,0,sizeof(FIL));
 	music_ctrl.i2sbuf1=malloc_bsc(APE_BLOCKS_PER_LOOP*4);// I2S DMA 缓冲区1(ping)
 	music_ctrl.i2sbuf2=malloc_bsc(APE_BLOCKS_PER_LOOP*4);// I2S DMA 缓冲区2(pong)
 	ape_buffer=malloc_bsc(APE_FILE_BUF_SZ);// 压缩数据读缓冲
 
 	// 全部指针都申请成功才继续解析
-	if(filterbuf64&&apectrl&&apex&&decoded0&&decoded1&&music_ctrl.file&&music_ctrl.i2sbuf1&&music_ctrl.i2sbuf2&&ape_buffer)
+	/* 注意: 这里必须有 else —— 任一分配失败时若 res 仍为 0, 会直接进下面的
+	 * "解析成功"分支, 用 NULL 的 apex/apectrl 去 memset / 配 DMA → HardFault。
+	 * 失败必须置 res, 让调用方走 Song_End。 */
+	if(!(filterbuf64&&apectrl&&apex&&decoded0&&decoded1&&music_ctrl.file&&music_ctrl.i2sbuf1&&music_ctrl.i2sbuf2&&ape_buffer))
+	{
+		res = 1;
+	}
+	else
 	{ 
 		// 上下文/控制结构/双 DMA 缓冲先清零
 		memset(apex,0,sizeof(struct ape_ctx_t));// 上下文清零
@@ -162,8 +171,16 @@ uint8_t ape_play_song_prepare(uint8_t* fname)
                     if (apex->seektable) {
                         uint32_t st_pos = apex->junklength + apex->descriptorlength + apex->headerlength;// seektable 的绝对位置
                         f_lseek(music_ctrl.file, st_pos);
-                        uint32_t br;// 实际读取的字节数
+                        uint32_t br = 0;// 实际读取的字节数
                         f_read(music_ctrl.file, apex->seektable, apex->totalframes * sizeof(uint32_t), &br);
+                        /* 必须校验实际读到的字节数:
+                         * 文件被截断/seektable 位置算错时 f_read 只读到一部分(或 0),
+                         * 而后面 ape_get_curtime / seek 会用这块未初始化内存算出
+                         * 任意 f_lseek 偏移(甚至除以 0), 表现为"一拖动进度条就死"。 */
+                        if (br != apex->totalframes * sizeof(uint32_t)) {
+                            free_bsc(apex->seektable);
+                            apex->seektable = NULL;
+                        }
                     }
                 }
                 // (seektable 兜底结束)

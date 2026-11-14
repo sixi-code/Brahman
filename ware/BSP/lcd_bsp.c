@@ -7,8 +7,7 @@
 
 #define USE_HORIZONTAL 1 //屏幕方向 0-竖屏 1-横屏 2-竖屏翻转 3-横屏翻转
 
-#define LCD_W 240 //屏幕宽度
-#define LCD_H 240//屏幕高度
+#include "lcd_bsp.h"   // LCD_W / LCD_H 统一由头文件给出, 避免两处各定义一份
 
 //引脚控制
 #define LCD_RES_Low()  GPIOB->BSRR = (uint32_t)GPIO_Pin_12 << 16// LCD复位引脚低电平 复位状态

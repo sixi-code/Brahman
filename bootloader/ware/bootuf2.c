@@ -126,10 +126,32 @@ static int ffind_by_cluster(uint32_t cluster)
     return -1;
 }
 
+/* 判断这一块是否可以写入。
+ * 块头字段来自主机, 一律当不可信输入:
+ *  1) NumberOfBlock 为 0 或超过上限 —— 会被 state_check 误判为完成;
+ *  2) PayloadSize 为 0 或超过 Data[476] —— 越界读, 还会写穿 4KB cache;
+ *  3) TargetAddress 与 PayloadSize 之和越过 APP 区 —— 会擦掉 Bootloader 自己;
+ *  4) BlockIndex 超过块数上限 —— Mask[pos] 越界写, 而 mask 只有 481 字节。
+ * 剩余情况交给 Mask 判重。 */
 static bool bootuf2block_check_writable(struct bootuf2_STATE *STATE,
                                         struct bootuf2_BLOCK *uf2, uint32_t block_max)
 {
-    if (uf2->NumberOfBlock) {
+    if ((uf2->NumberOfBlock == 0) || (uf2->NumberOfBlock > BOOTUF2_BLOCKSMAX)) {
+        USB_LOG_ERR("UF2 NumberOfBlock %u out of range\r\n", (unsigned)uf2->NumberOfBlock);
+        return false;
+    }
+    if ((uf2->PayloadSize == 0) || (uf2->PayloadSize > sizeof(uf2->Data))) {
+        USB_LOG_ERR("UF2 PayloadSize %u invalid\r\n", (unsigned)uf2->PayloadSize);
+        return false;
+    }
+    if ((uf2->TargetAddress < CONFIG_BOOTUF2_APP_START) ||
+        (uf2->TargetAddress + uf2->PayloadSize >
+         CONFIG_BOOTUF2_APP_START + CONFIG_BOOTUF2_FLASHMAX)) {
+        USB_LOG_ERR("UF2 TargetAddress %08x out of app region\r\n", (unsigned)uf2->TargetAddress);
+        return false;
+    }
+
+    {
         if (uf2->BlockIndex < block_max) {
             uint8_t mask = 1 << (uf2->BlockIndex % 8);
             uint32_t pos = uf2->BlockIndex / 8;
@@ -143,6 +165,11 @@ static bool bootuf2block_check_writable(struct bootuf2_STATE *STATE,
     return false;
 }
 
+/* 一次升级里 NumberOfBlock 只允许从 0 设置一次。
+ * 若主机发来第二个不同的 NumberOfBlock, 就把 NumberOfBlock 打成 0xffffffff
+ * 让会话永不完成 —— 宁可重来, 也不能把两份固件拼在一起烧进去。
+ * 换文件时 Mask 必须同步清空, 否则新文件的块会被上一轮的 mask 位跳过,
+ * 结果是固件缺块却仍自动重启。 */
 static void bootuf2block_state_update(struct bootuf2_STATE *STATE,
                                       struct bootuf2_BLOCK *uf2, uint32_t block_max)
 {
@@ -154,6 +181,9 @@ static void bootuf2block_state_update(struct bootuf2_STATE *STATE,
                 /*!< this will cause never auto reboot */
                 STATE->NumberOfBlock = 0xffffffff;
             } else {
+                /* 换了一个全新的升级文件: 清掉上一轮的进度, 否则会带错掩码 */
+                memset(STATE->Mask, 0, (BOOTUF2_BLOCKSMAX / 8) + 1);
+                STATE->NumberOfWritten = 0;
                 STATE->NumberOfBlock = uf2->NumberOfBlock;
             }
         }
@@ -202,6 +232,20 @@ static int bootuf2_flash_flush(struct bootuf2_data *ctx)
 
 int bootuf2_flash_write_internal(struct bootuf2_data *ctx, struct bootuf2_BLOCK *uf2)
 {
+    /* PayloadSize 是主机字段, 直接 memcpy 会有两种越界:
+     * 超过 Data[476] 时把块尾之后的内存当固件烧进去;
+     * 叠加 cached_bytes 超过 cache_size 时写穿 4KB 缓存。 */
+    if (uf2->PayloadSize == 0 || uf2->PayloadSize > sizeof(uf2->Data)) {
+        USB_LOG_ERR("UF2 payload size %d invalid (max %d)\r\n",
+                    (int)uf2->PayloadSize, (int)sizeof(uf2->Data));
+        return -1;
+    }
+    if (ctx->cached_bytes + uf2->PayloadSize > ctx->cache_size) {
+        USB_LOG_ERR("UF2 payload overflow cache (%d + %d > %d)\r\n",
+                    (int)ctx->cached_bytes, (int)uf2->PayloadSize, (int)ctx->cache_size);
+        return -1;
+    }
+
     /*!< 1.cache not empty and address not continue */
     /*!< 2.cache full */
     if ((ctx->cached_bytes && ((ctx->cached_address + ctx->cached_bytes) != uf2->TargetAddress)) ||
@@ -211,7 +255,6 @@ int bootuf2_flash_write_internal(struct bootuf2_data *ctx, struct bootuf2_BLOCK 
             return err;
     }
 
-    /*!< write len always is 256, cache_size always is a multiple of 256 */
     memcpy(ctx->cache + ctx->cached_bytes, uf2->Data, uf2->PayloadSize);
 
     ctx->cached_address = uf2->TargetAddress - ctx->cached_bytes;
@@ -230,6 +273,16 @@ void bootuf2_init(void)
 
     ctx->cached_bytes = 0;
     ctx->cached_address = 0;
+
+    /* 显式清空升级状态与掩码。
+     * 上电周期内软件复位会重新执行到这里, 残留的 Mask 位会让主机重发的块被判为
+     * "已写过"而跳过, NumberOfWritten 不再增长, 进度条永远走不到 100%。 */
+    memset(bootuf2_mask, 0, sizeof(bootuf2_mask));
+    bootuf2_STATE.NumberOfBlock   = 0;
+    bootuf2_STATE.NumberOfWritten = 0;
+    bootuf2_STATE.Enable          = 1;
+
+    boot2uf2_flash_init();   // 解锁并清理 Flash 标志 + 清空擦除位图
 }
 
 int boot2uf2_read_sector(uint32_t start_sector, uint8_t *buff, uint32_t sector_count)
@@ -395,9 +448,17 @@ int bootuf2_write_sector(uint32_t start_sector, const uint8_t *buff, uint32_t se
         }
 
         if (uf2->FamilyID == CONFIG_BOOTUF2_FAMILYID) {
-            if (bootuf2block_check_writable(ctx->STATE, uf2, CONFIG_BOOTUF2_FLASHMAX)) {
-                bootuf2_flash_write_internal(ctx, uf2);
-                bootuf2block_state_update(ctx->STATE, uf2, CONFIG_BOOTUF2_FLASHMAX);
+            /* 第三个参数是"块数上限", 必须传 BOOTUF2_BLOCKSMAX。
+             * 若误传字节数(0xF0000), BlockIndex/8 可超过 mask 的 481 字节, 越界写。 */
+            if (bootuf2block_check_writable(ctx->STATE, uf2, BOOTUF2_BLOCKSMAX)) {
+                if (bootuf2_flash_write_internal(ctx, uf2) != 0) {
+                    /* 写失败不更新 mask, 主机可重发这一块;
+                     * NumberOfWritten 也保持旧值, 避免进度虚满。 */
+                    USB_LOG_ERR("UF2 block %d write failed at %08x\r\n",
+                                (int)uf2->BlockIndex, (unsigned)uf2->TargetAddress);
+                    goto next;
+                }
+                bootuf2block_state_update(ctx->STATE, uf2, BOOTUF2_BLOCKSMAX);
             } else {
                 USB_LOG_DBG("UF2 block %d already written\r\n",
                             uf2->BlockIndex);
@@ -438,7 +499,14 @@ uint32_t bootuf2_get_written_blocks(void)
 bool bootuf2_is_write_done(void)
 {
     if (bootuf2block_state_check(bootuf2_disk.STATE)) {
-        bootuf2_flash_flush(&bootuf2_disk);
+        /* 末段缓存写成功才算完成。
+         * flush 失败时不能让主机看到"成功", 否则设备带着缺尾的固件复位,
+         * 而原固件已被部分擦除。 */
+        if (bootuf2_flash_flush(&bootuf2_disk) != 0) {
+            USB_LOG_ERR("UF2 final flush failed, stay in bootloader\r\n");
+            bootuf2_disk.STATE->NumberOfBlock = 0xFFFFFFFF;  // 标记永不完成, 主机重拖
+            return false;
+        }
         USB_LOG_DBG("UF2 update ok\r\n");
         return true;
     } else {

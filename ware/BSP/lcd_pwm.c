@@ -66,13 +66,20 @@ void LCD_PWM_DeInit(void)
 // 设置PWM占空比,设置背光亮度
 void LCD_PWM_SetDutyCycle(uint16_t duty)
 {
-    //duty:0~256 实际最大值280
-    TIM8->CCR1 = 5 * (duty+5); //设置TIM8的通道1的比较寄存器的值，从而改变PWM的占空比
+    /* CCR1 = 5*(duty+5), ARR = 1399。
+     * duty > 275 时 CCR1 > ARR: PWM1 模式下比较值超出周期, 输出恒为有效电平,
+     * 亮度直接阶跃到 100% 且不再随滑块变化(看起来像"调亮到头就没反应了")。
+     * duty 上限钳到 275 即 5*(275+5)=1400 ≈ 满占空。 */
+    if (duty > 275) duty = 275;
+    TIM8->CCR1 = 5 * (duty + 5);
 }
 
 // 设置PWM频率
 void LCD_PWM_SetFrequency(uint16_t frequency)
 {
-    //frequency:1~60k
-    TIM8->PSC = (60000 / frequency) - 1; //设置TIM8的预分频值，从而改变PWM的频率
+    /* frequency=0 会触发整数除零(Cortex-M4 上直接 UsageFault);
+     * 大于 60000 时 (60000/frequency)-1 下溢成 0xFFFF, 实际频率掉到 1Hz 级,
+     * 背光肉眼可见闪烁。 */
+    if (frequency < 1 || frequency > 60000) return;
+    TIM8->PSC = (60000 / frequency) - 1;
 }

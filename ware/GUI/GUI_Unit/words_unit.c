@@ -130,6 +130,14 @@ static void refresh_mode_label(void)
 
 // ================= 选书页面相关函数 =================
 
+/* 条目对象销毁时把名字还给 CCM 池。
+ * 对象删除发生在 CLICKED 之后, 顺序上不会有人再用这块内存。 */
+static void book_name_free_cb(lv_event_t * e)
+{
+    void * p = lv_event_get_user_data(e);
+    if (p != NULL) free_ccm(p);
+}
+
 static void book_item_click_cb(lv_event_t * e)
 {
     const char * filename = (const char *)lv_event_get_user_data(e);
@@ -196,6 +204,11 @@ static void build_book_list(void)
                 if (name_copy) {
                     strcpy(name_copy, fno.fname);
                     lv_obj_add_event_cb(item_cont, book_item_click_cb, LV_EVENT_CLICKED, name_copy);
+                    /* 必须挂 DELETE 回调把它还给 CCM:
+                     * build_book_list() 每次进列表都会删掉重建 item_cont,
+                     * 只在 CLICKED 里用完而不释放会每次泄漏 N 块 CCM,
+                     * 十几次后 CCM 池(62KB)见底, 所有用 CCM 的页面一起白屏。 */
+                    lv_obj_add_event_cb(item_cont, book_name_free_cb, LV_EVENT_DELETE, name_copy);
                 }
 
                 lv_obj_t * lbl = lv_label_create(item_cont);

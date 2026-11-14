@@ -93,6 +93,19 @@ extern Lunar_t now_lunar; //农历
 //lcd_bsp.c
 extern volatile uint8_t g_lcd_user; // 当前LCD使用者标识
 
+/* LVGL 显存重建请求。
+ * 显存只能由 LVGL 任务在自己的上下文里重建: 其它任务(媒体/游戏/副屏)在
+ * Suspend 之后直接调 lv_port_disp_reinit()/lv_obj_invalidate(), 会与 LVGL
+ * 内部的 inv_areas/draw_buf 状态竞争。约定: 请求方置 1 后再 Resume LVGL,
+ * 由 Lvgl_Task 在循环安全点消费。 */
+extern volatile uint8_t g_lvgl_disp_reinit_req;
+
+/* 音乐进度条 seek 请求 (UI 线程只写不执行, 由 Music_Task 在安全点执行 seek)。
+ * 直接在 LVGL 回调里做 seek 会与 MUSIC 任务的 f_read 抢同一个 FIL, 还会把
+ * LVGL 任务阻塞 40ms 以上导致拖动条粘住。 */
+extern volatile uint32_t g_music_seek_req;      // 目标秒数
+extern volatile uint8_t  g_music_seek_pending;  // 1=有未处理的 seek 请求
+
 // es9018k2m.c
 extern volatile uint8_t g_es9018_inited;     // ES9018初始化标志
 extern volatile uint8_t kv_es9018_status;    // ES9018 供电开关 (持久化) 0：关断，1：供电
@@ -161,6 +174,21 @@ extern volatile uint8_t g_VorP; // 状态栏电池区显示模式 0-显示电压
 extern volatile uint8_t Music_Suspend_Flag; // 音乐暂停标志 0: 播放中, 1: 暂停
 extern volatile uint8_t kv_music_switch_method; // 音乐播放模式 (Play_In_Order/Play_Randomly/Play_Repeatly)
 extern volatile uint8_t Music_Status;         // 音乐播放状态 (Music_None/Song_*/Music_Exit)
+/* 外部(GUI)对音乐状态机的请求通道。
+ * Music_Status 是 MUSIC 任务与解码器共用的状态机变量, 解码器里大量
+ * "读-判断-改写" (if(Music_Status==Song_Next){... Music_Status=Song_Prepare;})
+ * 都不是原子操作。GUI 直接写 Music_Status 会与这些判断交错:
+ * 连点两次"下一首"时后一次被 Song_Prepare 覆盖(表现为"点了没反应"),
+ * 点"退出"时 Song_Error 被改回 Music_Exit(表现为"回到桌面还在放歌")。
+ * 约定: GUI 只调 Music_Request(), 由 Music_Task 在循环安全点消费。 */
+extern volatile uint8_t g_music_req;          // 0=无请求, 其余为 Song_xxx / Music_Exit
+
+static inline void Music_Request(uint8_t st)
+{
+    taskENTER_CRITICAL();
+    g_music_req = st;
+    taskEXIT_CRITICAL();
+}
 
 //keyboard.c
 extern volatile uint8_t g_host_kbd_key;      // 接收到的物理键盘键码 (USB Host HID)

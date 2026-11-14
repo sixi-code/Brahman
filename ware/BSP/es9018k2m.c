@@ -81,6 +81,8 @@ static void IIC_Delay(void)
     while (i--);
 }
 
+static void IIC_Bus_Recover(void);
+
 // IIC初始化
 static void I2C1_Init(void) 
 {
@@ -99,9 +101,10 @@ static void I2C1_Init(void)
     GPIO_InitStruct.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    // 释放总线
+    // 释放总线, 并做一次总线恢复(应对上次会话中从机掉电锁死 SDA 的情况)
     IIC_SCL_HIGH();
     IIC_SDA_HIGH();
+    IIC_Bus_Recover();
 }
 
 // IIC起始信号
@@ -125,6 +128,24 @@ static void IIC_Stop(void)
     IIC_Delay();
     IIC_SDA_HIGH();  // SCL为高时，SDA由低变高产生停止信号
     IIC_Delay();
+}
+
+/* I2C 总线恢复: 从机在传输中途掉电时会把 SDA 拉低不放, 主机侧表现为
+ * 每次 Start 都拿不到 ACK, 而且复位 I2C 外设也无效 —— 必须由主机补 9 个
+ * SCL 脉冲, 把从机移位寄存器里的残留位"走"出去, 再补一个 STOP 让总线空闲。
+ * 这是 ES9018 热插拔(耳机口上电/断电)后"调音量没反应、必须重启"的根因修复。 */
+static void IIC_Bus_Recover(void)
+{
+    uint8_t i;
+    IIC_SDA_HIGH();          // 主机释放 SDA, 依靠上拉拉高
+    for (i = 0; i < 9; i++)  // 9 个时钟: 最多 8 个数据位 + 1 个 ACK 位
+    {
+        IIC_SCL_LOW();
+        IIC_Delay();
+        IIC_SCL_HIGH();
+        IIC_Delay();
+    }
+    IIC_Stop();              // 补 STOP, 让从机状态机归位
 }
 
 
@@ -209,6 +230,10 @@ static uint8_t I2C_Write_ES9018(uint8_t regAddr, uint8_t data)
     IIC_Start();
     IIC_Send_Byte(ESS9018_ADDR); // 发送设备写地址
     if(IIC_Wait_Ack()) {
+        /* 必须补 STOP: 无应答时从机可能仍把 SDA 拉低, 只 unlock 不释放总线,
+         * SCL 停在释放态, 总线永久处于"忙" → 之后每次访问都失败
+         * (表现为音量调不动、爆音, 且不重启无法恢复)。 */
+        IIC_Stop();
         IIC_unlock();
         return ES9018_ERR_I2C_ADDR;
     }
@@ -241,6 +266,10 @@ static uint8_t I2C_Read_ES9018(uint8_t regAddr, uint8_t *pData)
     IIC_Start();
     IIC_Send_Byte(ESS9018_ADDR); // 发送设备写地址
     if(IIC_Wait_Ack()) {
+        /* 必须补 STOP: 无应答时从机可能仍把 SDA 拉低, 只 unlock 不释放总线,
+         * SCL 停在释放态, 总线永久处于"忙" → 之后每次访问都失败
+         * (表现为音量调不动、爆音, 且不重启无法恢复)。 */
+        IIC_Stop();
         IIC_unlock();
         return ES9018_ERR_I2C_ADDR;
     }
@@ -525,7 +554,11 @@ uint8_t ES9018_Init(void)
     
     //检查芯片是否在线并读取状态
     res = ES9018_Read_Chip_Status();
-    if(s_es9018_state.chip_id != 4 && !res) {
+    /* 原条件 `chip_id != 4 && !res` 逻辑反了:
+     * 只有"读成功了(res==0)但 ID 不对"才说明芯片型号异常;
+     * 原写法把"读失败(res!=0)"排除在外 —— I2C 挂了反而被判成通过,
+     * 于是后面照样走初始化并置 g_es9018_inited=1, 上层以为芯片正常。 */
+    if(res == ES9018_OK && s_es9018_state.chip_id != 4) {
         res = ES9018_ERR_CHIP_ID;
     }
     

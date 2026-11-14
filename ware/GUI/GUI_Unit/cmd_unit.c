@@ -39,6 +39,8 @@ typedef struct {
     uint16_t log_count; // 日志行数
     uint8_t  need_update; // 是否需要更新
 
+    char     cmd_line[MAX_CMD_LEN]; // 待执行的命令行(事件回调里只登记)
+
     // 子页面状态
     uint8_t  sub_page;      // 0=模式选择, 1=Shell
     lv_obj_t *mode_cont;    // 模式选择容器
@@ -48,6 +50,16 @@ typedef struct {
 
 
 static cmd_state_t * cmd_state = NULL;
+
+/* 待执行的命令行请求。
+ * 不能在 LVGL 事件回调里逐字符喂 shellHandler:
+ * 敲一次回车就在 UI 线程里跑 fs/ls(遍历 SD 卡, 数百 ms), 界面冻结;
+ * 如果命令里带长操作, 还会把 LVGL 任务和小键盘状态一起拖住。
+ * 改成回调只登记一行, 由 Update_Cmd_Unit() 在下一帧执行。 */
+static uint8_t  g_cmd_req = 0;
+/* 命令行缓冲放在 cmd_state(堆/BSC) 里而不是静态区:
+ * RW_IRAM1 现在只剩约 600B 余量, 能省 80B 就省 80B。 */
+#define g_cmd_line (cmd_state->cmd_line)
 
 // ================= Shell 移植接口 =================
 
@@ -291,11 +303,12 @@ static void ta_input_event_cb(lv_event_t * e)
             strncpy(cmd, txt, len - 1);
             cmd[len - 1] = '\0';
 
-            if (cmd_state) {
-                for (size_t i = 0; i < len - 1; i++) {
-                    shellHandler(&cmd_state->shell_obj, cmd[i]);
-                }
-                shellHandler(&cmd_state->shell_obj, '\r');
+            /* 只登记, 不在事件回调里跑 shell (见 g_cmd_line 的说明) */
+            if (cmd_state && !g_cmd_req) {
+                size_t n = (len - 1 < sizeof(g_cmd_line) - 1) ? (len - 1) : (sizeof(g_cmd_line) - 1);
+                memcpy(g_cmd_line, cmd, n);
+                g_cmd_line[n] = '\0';
+                g_cmd_req = 1;
             }
 
             free_bsc(cmd);
@@ -408,6 +421,16 @@ void Create_Cmd_Unit(void)
 void Update_Cmd_Unit(void)
 {
     if (!cmd_state) return;
+
+    /* 在 UI 的 update 阶段消费命令请求: 这里执行长耗时命令的代价是"掉一帧",
+     * 而不是在事件回调里把整条输入通路堵死。 */
+    if (g_cmd_req && cmd_state->shell_log_buffer != NULL) {
+        g_cmd_req = 0;
+        for (char *p = g_cmd_line; *p != '\0'; p++) {
+            shellHandler(&cmd_state->shell_obj, *p);
+        }
+        shellHandler(&cmd_state->shell_obj, '\r');
+    }
 
 	Update_Keyboard();
 		

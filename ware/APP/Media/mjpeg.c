@@ -10,6 +10,7 @@
 #include "variables.h"
 #include "defines.h"
 #include "debug.h"
+#include "mjpeg.h"     // video_mjpeg_play_deinit 声明(初始化失败时要回退收尾)
 
 #define LCD_WIDTH  240
 #define LCD_HEIGHT 240
@@ -139,12 +140,18 @@ uint8_t video_mjpeg_play_init(const char *file)
 
     // 4. 分配工作缓冲区
     workbuf = (uint8_t*)malloc_bsc(WORKBUF_SIZE);
-    if (!workbuf) return 1;
+    if (!workbuf) { video_mjpeg_play_deinit(); return 1; }
 
     // 5. 分配双行缓冲区
     line_buf[0] = (uint16_t*)malloc_bsc(LCD_WIDTH * BUF_LINES * sizeof(uint16_t));
     line_buf[1] = (uint16_t*)malloc_bsc(LCD_WIDTH * BUF_LINES * sizeof(uint16_t));
-    if (!line_buf[0] || !line_buf[1]) return 1;
+    /* 失败路径必须走 deinit 收尾, 否则已打开的文件与已分配的缓冲全部泄漏
+     * (视频文件句柄泄漏后, FatFs 的 file 对象表会被占满, 之后连音频都放不了)。
+     * 统一走 deinit 收尾 —— deinit 已改为按"有没有资源"判断, 不再依赖 initialized。 */
+    if (!line_buf[0] || !line_buf[1]) {
+        video_mjpeg_play_deinit();
+        return 1;
+    }
 
     // 6. 初始化状态变量
     buf_start_y = 0;
@@ -206,7 +213,11 @@ uint8_t video_mjpeg_play_task(void) {
 // 反初始化：释放资源
 void video_mjpeg_play_deinit(void) 
 {
-    if (!initialized) return;
+    /* 不能用 initialized 单独做门闩:
+     * init 中途失败时 initialized 还是 0, 但文件已打开、缓冲已分配;
+     * 上层看到 res!=0 立刻调 deinit(), 原写法直接 return → 每失败一次
+     * 泄漏一个 FIL + 10KB 工作缓冲 + 2 行缓冲, 开 5 次就耗尽 BSC 池。 */
+    if (!initialized && !file_opened && !workbuf && !line_buf[0] && !line_buf[1]) return;
 
     // 退出前确保没有未完成的DMA传输
     if (dma_busy) {

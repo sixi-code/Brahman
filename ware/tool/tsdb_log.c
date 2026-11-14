@@ -75,8 +75,17 @@ void tsdb_log_flush(void)
         taskEXIT_CRITICAL();
 
         ts++;// 增加时间戳，确保每条日志都有唯一的时间戳
+        /* FlashDB 的 TSDB 单条上限是 fdb_tsdb_init() 传入的 max_len(=128),
+         * 超过时 fdb_tsl_append 直接返回"丢弃", 而 FDB_INFO 没开, 现场表现为
+         * "日志写了但查不到", 很容易被误判成 Flash 坏。
+         * 这里主动截断到上限, 宁可少几个字也不要整条丢失。 */
+        size_t n = strlen(buf);
+        if (n > tsdb.max_len) {
+            n = tsdb.max_len;
+            buf[n] = '\0';
+        }
         struct fdb_blob blob;
-        fdb_tsl_append_with_ts(&tsdb, fdb_blob_make(&blob, buf, strlen(buf)), ts);
+        fdb_tsl_append_with_ts(&tsdb, fdb_blob_make(&blob, buf, n), ts);
     }
 }
 

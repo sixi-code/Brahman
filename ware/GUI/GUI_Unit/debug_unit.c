@@ -198,12 +198,16 @@ void lvgl_printf(const char *format, ...)
     int line_start = 0;
     for (int i = 0; i <= len; i++) {
         if (buf[i] == '\n' || buf[i] == '\0') {
+            /* 先记下"这是真正的结尾"再写 '\0':
+             * 原写法 buf[i]='\0' 之后紧接着 if(buf[i]=='\0') break ——
+             * 条件恒真, 于是第一条 \n 就 break, 多行日志只剩第一行。 */
+            uint8_t is_end = (buf[i] == '\0');
             buf[i] = '\0';
             if (i > line_start) {
                 lvgl_log_write_line(&buf[line_start]);
             }
             line_start = i + 1;
-            if (buf[i] == '\0') break;
+            if (is_end) break;
         }
     }
     need_update = 1;

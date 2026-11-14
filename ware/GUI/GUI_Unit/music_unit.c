@@ -112,23 +112,20 @@ static void slider_event_cb(lv_event_t * e) {
         lv_label_set_text(ms->label_curr_time, ms->buf_curr);
     }
 
-    // 松手释放：执行跳转
+    // 松手释放：请求跳转
     if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         uint32_t target_sec = lv_slider_get_value(slider);
 
-        // 修复：解决 FatFs 并发导致的死循环卡死
-        uint8_t old_suspend = Music_Suspend_Flag;
-        Music_Suspend_Flag = 1;
-        
-        // 延时 40ms，确保后台解码任务已完成并退出当前的 f_read 动作
-        vTaskDelay(pdMS_TO_TICKS(40));
+        /* 这里不能做 seek。
+         * 在 LVGL 事件回调里直接 vTaskDelay(40) + audio_seek() 有三重问题:
+         *  - vTaskDelay 把 LVGL 任务钉住 40ms, 手感卡顿;
+         *  - audio_seek 会碰 FatFs 的同一个 FIL, 与 MUSIC 任务的 f_read 并发;
+         *  - 若这期间又按下一次, lv_indev 的 PRESSED/RELEASED 配对错位,
+         *    进度条就粘在手指位置不动。
+         * 改成"只记请求", 由 Music_Task 在它自己的循环里执行。 */
+        g_music_seek_req     = target_sec;
+        g_music_seek_pending = 1;
 
-        // 此时底层的 file 对象没人抢，安全执行跳转
-        audio_seek(target_sec);
-        
-        // 恢复播放状态
-        Music_Suspend_Flag = old_suspend;
-        
         ms->last_current_sec = target_sec;
         ms->is_dragging = false; 
     }
@@ -172,13 +169,13 @@ static void music_icon_event_handler(lv_event_t * e) {
 			else lv_obj_set_style_img_recolor(target, lv_palette_lighten(LV_PALETTE_GREY, 1), 0);
 			break;
 		case 5: //上一个
-			Music_Status = Song_Previous;
+			Music_Request(Song_Previous);   // 交给 MUSIC 任务在安全点执行, 见 variables.h
 			break;
 		case 6: //播放/暂停
 			Music_Suspend_Flag = !Music_Suspend_Flag;
 			break;
 		case 7: //下一个
-			Music_Status = Song_Next;
+			Music_Request(Song_Next);
 			break;
 	}
 }

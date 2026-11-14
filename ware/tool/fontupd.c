@@ -8,6 +8,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "variables.h"
+#include "iwdg_feed.h"
 
 //lvgl字库读取缓冲区
 uint8_t __g_font_buf[210]; 
@@ -52,6 +53,8 @@ static uint8_t updata_fontx(uint8_t *fxpath, uint8_t fx, uint32_t start_addr)
     uint8_t ret = 0;// 返回值，0表示成功，其他表示错误码
     uint16_t bread;// 实际读取的字节数
     uint32_t offx = 0;// 当前写入偏移量
+    uint32_t new_addr = 0;// 本次要提交的新字库地址(成功后才写回全局)
+    uint32_t new_size = 0;// 本次要提交的新字库大小
     FILINFO fileInfo;// 文件信息结构体
 
     fftemp = (FIL *)malloc_bsc(sizeof(FIL));
@@ -74,34 +77,49 @@ static uint8_t updata_fontx(uint8_t *fxpath, uint8_t fx, uint32_t start_addr)
         goto __exit;
     }
 	
-    // 更新结构体信息
-    if (fx < FONT_CONFIG_COUNT) {
-        *(fontConfigs[fx].addr) = flashaddr;
-        *(fontConfigs[fx].size) = fileInfo.fsize;
-    } else {
+    /* 全局字库信息必须先"记在本地", 等整个文件写成功之后才提交。
+     * 若进口就改 fontConfigs[fx].addr/size, 而 ftinfo.fontok 要到最后才写:
+     * 中途掉电或卡读失败时, 重启后 font_init() 看到 size != 0 但数据是空的
+     * → 全屏乱码; 且 size 已"有效", 自动升级逻辑也不再触发, 只能手动修。 */
+    if (fx >= FONT_CONFIG_COUNT) {
         ret = 4;
         goto __exit;
     }
+    new_addr = flashaddr;
+    new_size = fileInfo.fsize;
 
     // 循环写入
     while (1) {
+        IWDG_FEED_SAFE();   // 字库文件可达数 MB, 持续写 Flash 必须喂狗
         res = f_read(fftemp, tempbuf, 4096, (uint32_t *)&bread);
         if (res != FR_OK) {
             ret = 5;
             break;
         }
-        // 写入 Flash
+        // 写入 Flash (越界检查: 不允许越过字库区末尾)
+        if ((uint32_t)offx + flashaddr + bread > (uint32_t)FONTINFOADDR + (uint32_t)FONTSECSIZE) {
+            ret = 6;
+            break;
+        }
         W25QXX_Write(tempbuf, offx + flashaddr, bread);
         offx += bread;
 
-        if (fx < FONT_CONFIG_COUNT && *(fontConfigs[fx].size) > 0) {
-            g_font_update_progress = (uint8_t)((offx * 100) / *(fontConfigs[fx].size));
+        if (new_size > 0) {
+            g_font_update_progress = (uint8_t)((offx * 100) / new_size);
         }
 
         if (bread != 4096) break;
     }
     
     f_close(fftemp);
+
+    /* 只有完整写完才提交新的 addr/size —— 与上面的"先记本地"配对 */
+    if (ret == 0 && offx == new_size) {
+        *(fontConfigs[fx].addr) = new_addr;
+        *(fontConfigs[fx].size) = new_size;
+    } else if (ret == 0) {
+        ret = 7;   // 读到的字节数与文件大小不符(文件被截断/卡读错误)
+    }
 
 __exit:
     if (fftemp) free_bsc(fftemp);
@@ -156,6 +174,11 @@ uint8_t update_font(uint8_t* src)
 			W25QXX_Erase_Sector(addr);
 			sector_count++;
 			g_font_update_progress = (uint8_t)((sector_count * 100) / total_sectors);
+			// 7MB 字库区共 1792 个扇区, 全程远超看门狗超时: 每擦 16 个扇区喂一次狗并让出 CPU
+			if ((sector_count & 0x0F) == 0) {
+				IWDG_FEED_SAFE();
+				vTaskDelay(pdMS_TO_TICKS(1));
+			}
 		}
 	}
 

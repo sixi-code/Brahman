@@ -50,7 +50,10 @@ uint8_t video_play_init(const char *file)
     // 4. 分配双缓冲
     buf[0] = (uint8_t*)malloc_bsc(BLOCK_SIZE);
     buf[1] = (uint8_t*)malloc_bsc(BLOCK_SIZE);
-    if (buf[0] == NULL || buf[1] == NULL) return 1;
+    /* 下面的失败点统一 goto fail 收尾: 裸 return 会漏掉文件句柄和缓冲区,
+     * 全部泄漏。RAW 视频动辄几十 MB, 每次失败漏 2×BLOCK_SIZE + 一个 FIL,
+     * 连点几次"打开失败"后 TLSF 池就碎了。统一 goto fail 收尾。 */
+    if (buf[0] == NULL || buf[1] == NULL) goto fail;
 
     // 5. 初始化状态
     current_frame_start = 0;
@@ -60,19 +63,25 @@ uint8_t video_play_init(const char *file)
 
     // 读取第一块到发送缓冲区，启动 DMA
     fr = f_lseek(&fil, current_frame_start);
-    if (fr != FR_OK) return 1;
+    if (fr != FR_OK) goto fail;
     fr = f_read(&fil, buf[send_buf], BLOCK_SIZE, &br);
-    if (fr != FR_OK || br != BLOCK_SIZE) return 1;
+    if (fr != FR_OK || br != BLOCK_SIZE) goto fail;
 
     LCD_Address_Set(0, 0, LCD_WIDTH - 1, BLOCK_ROWS - 1);
     LCD_Write_DMA((uint16_t*)buf[send_buf], BLOCK_SIZE / BYTES_PER_PIXEL);
 
     // 预读第二块
     fr = f_read(&fil, buf[fill_buf], BLOCK_SIZE, &br);
-    if (fr != FR_OK || br != BLOCK_SIZE) return 1;
+    if (fr != FR_OK || br != BLOCK_SIZE) goto fail;
 
     initialized = 1;
     return 0;
+
+fail:
+    f_close(&fil);
+    if (buf[0]) { free_bsc(buf[0]); buf[0] = NULL; }
+    if (buf[1]) { free_bsc(buf[1]); buf[1] = NULL; }
+    return 1;
 }
 
 uint8_t video_play_task(void) 
@@ -160,7 +169,8 @@ uint8_t video_play_task(void)
 // 反初始化视频播放模块
 void video_play_deinit(void) 
 {
-    if (!initialized) return;
+    /* 只有确实分配过缓冲才需要收尾 */
+    if (!initialized && buf[0] == NULL && buf[1] == NULL) return;
 
     f_close(&fil);
 

@@ -206,7 +206,8 @@ static void note_update_name_label(void)
 // 取消本次离开: 把切换目标改回当前页
 static void note_abort_switch(void)
 {
-	Page_Request_Switch(Page_Get_Current());
+	/* 同 canvas_abort_switch: 走 Page_Request_Switch 会把刚输入的笔记名清空 */
+	Page_Cancel_Switch();
 }
 
 // 写盘成功后的收尾: 放行本次页面切换
@@ -423,6 +424,12 @@ bool Note_Unit_Can_Exit(void)
 {
 	if (ns == NULL) return true;
 	if (!ns->dirty || ns->exit_ok) return true;
+
+	/* 自愈: dlg 指向的对象已被删除时不能继续拦下(否则永远出不去) */
+	if (ns->dlg != NULL && !lv_obj_is_valid(ns->dlg)) {
+		ns->dlg = NULL;
+		ns->ask = NOTE_ASK_NONE;
+	}
 
 	if (ns->dlg == NULL) {// 还没弹过
 		ns->ask = NOTE_ASK_LEAVE;

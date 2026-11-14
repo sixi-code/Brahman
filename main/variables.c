@@ -84,6 +84,10 @@ Lunar_t now_lunar; //农历
 
 //lcd_bsp.c
 volatile uint8_t g_lcd_user = LCD_USER_LVGL;// 当前LCD使用者标识
+volatile uint8_t g_lvgl_disp_reinit_req = 0;// LVGL 显存重建请求(由 Lvgl_Task 消费)
+volatile uint8_t  g_music_req = 0;          // 外部对音乐状态机的请求(由 Music_Task 消费)
+volatile uint32_t g_music_seek_req = 0;     // 音乐进度条 seek 目标秒数
+volatile uint8_t  g_music_seek_pending = 0; // 1=有待处理的 seek 请求(由 Music_Task 执行)
 
 // es9018k2m.c
 volatile uint8_t g_es9018_inited = 0;     // ES9018初始化标志
