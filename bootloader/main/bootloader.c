@@ -5,6 +5,7 @@
 #include "usbd_msc_conf.h"
 #include "bootuf2.h"
 #include "bootuf2_config.h"
+#include "boot_marker.h"
 #include "systick_conf.h"
 #include "lcd_bsp.h"
 #include "malloc.h"
@@ -53,6 +54,9 @@ void Jump_To_Main(void)
         RCC->AHB1RSTR |=  gpio_rst;
         RCC->AHB1RSTR &= ~gpio_rst;
 
+        /* 镜像校验通过: 清掉"升级中"标记, 之后再掉电也不会被误判为半截固件 */
+        Boot_Marker_Set(BOOT_MARK_NONE);
+
         __set_MSP(app_sp);
         pFunction JumpToApplication = (pFunction)app_pc;
         JumpToApplication();
@@ -75,7 +79,13 @@ int main(void)
     Pin_Ctrl_Init();  //pin
     Wakeup_Key_Init();//wakeup
 
-	if(Read_Wakeup_Key_Debounced())
+	Boot_Marker_Init();
+
+	/* 上一次升级没写完(标记仍是 UPGRADING)时, APP 区可能是半截固件。
+	 * 这时不跳转, 直接进 UF2 等待重新拖入, 否则用户看到的是"变砖"。
+	 * 标记为 DONE/NONE 表示镜像完整或从未升级过, 正常跳转。 */
+	/* 三个进入 UF2 的条件: 上次升级未完成 / 上电按住按键 / (否则) 跳 APP */
+	if ((Boot_Marker_Get() == BOOT_MARK_UPGRADING) || Read_Wakeup_Key_Debounced())
 	{
 		msc_bootuf2_init(0, 0x40040000UL);
 		xTaskCreate(Task,"Task",512,NULL,3,&Task_handler);

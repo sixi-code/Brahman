@@ -109,10 +109,12 @@
 //USB主机PSC线程 优先级5
 
 //音乐任务
-// 注: 栈单位是 4 字节 word(configSTACK_DEPTH_TYPE=uint16_t), 1024 = 4KB。
-// build/Target_1/Brahman.htm 里 Music_Task 的静态栈深是 4960B 且不含 stb_vorbis 的
-// Unknown 部分, 原 4KB 播 OGG 必然踩穿, 这里扩到 8KB。
-#define MUSIC_PRIO         6
+// 栈单位是 4 字节 word(configSTACK_DEPTH_TYPE=uint16_t), 2048 = 8KB。
+// 静态分析给出的 Music_Task 栈深是 4960B, 且不含 stb_vorbis 里无法静态求值的
+// 部分, 4KB(1024) 播 OGG 必然踩穿, 因此扩到 8KB。
+// 优先级放在 USB(4) 之下、与 BASIC(3) 同级: 解码的主要时间花在等 DMA 信号量,
+// 降低优先级不会拖慢播放, 但能把 SD 卡阻塞读期间的 CPU 让给界面与 USB。
+#define MUSIC_PRIO         3
 #define MUSIC_STACK_SIZE   2048
 
 //任务管理器

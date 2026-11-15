@@ -4,8 +4,33 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "stm32f4xx.h"
 #include "bootuf2.h"
+#include "boot_marker.h"
 #include "usbd_core.h"
+
+/* ===== 升级掉电标记 =====
+ * 存放在 RTC 备份寄存器: 软复位与短时掉电都不清零。
+ * 实现放在本文件是因为它已参与编译; 声明在 boot_marker.h 供 main 使用。 */
+#define BOOT_MARK_BKP   RTC->BKP10R
+
+void Boot_Marker_Init(void)
+{
+    RCC->APB1ENR |= RCC_APB1ENR_PWREN;
+    (void)RCC->APB1ENR;          /* 读回一次, 确保 PWR 时钟已生效 */
+    PWR->CR |= PWR_CR_DBP;       /* 解除备份域写保护 */
+}
+
+uint32_t Boot_Marker_Get(void)
+{
+    return BOOT_MARK_BKP;
+}
+
+void Boot_Marker_Set(uint32_t state)
+{
+    PWR->CR |= PWR_CR_DBP;
+    BOOT_MARK_BKP = state;
+}
 
 char file_INFO[] = {
     "Brahman UF2 BOOT Powered By CherryUSB\r\n"
@@ -451,6 +476,11 @@ int bootuf2_write_sector(uint32_t start_sector, const uint8_t *buff, uint32_t se
             /* 第三个参数是"块数上限", 必须传 BOOTUF2_BLOCKSMAX。
              * 若误传字节数(0xF0000), BlockIndex/8 可超过 mask 的 481 字节, 越界写。 */
             if (bootuf2block_check_writable(ctx->STATE, uf2, BOOTUF2_BLOCKSMAX)) {
+                /* 第一块即将落盘: 打上"升级中", 此后掉电都不会再跳 APP。
+                 * 放在这里而不是 init 里 —— 只是进 UF2 模式看看就断电的场合
+                 * 不应把设备留在 Bootloader。 */
+                Boot_Marker_Set(BOOT_MARK_UPGRADING);
+
                 if (bootuf2_flash_write_internal(ctx, uf2) != 0) {
                     /* 写失败不更新 mask, 主机可重发这一块;
                      * NumberOfWritten 也保持旧值, 避免进度虚满。 */
@@ -507,6 +537,8 @@ bool bootuf2_is_write_done(void)
             bootuf2_disk.STATE->NumberOfBlock = 0xFFFFFFFF;  // 标记永不完成, 主机重拖
             return false;
         }
+        /* 全部块写完整: 标记完成, 下次上电允许跳转 APP */
+        Boot_Marker_Set(BOOT_MARK_DONE);
         USB_LOG_DBG("UF2 update ok\r\n");
         return true;
     } else {

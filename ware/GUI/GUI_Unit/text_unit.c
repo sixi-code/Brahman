@@ -55,7 +55,8 @@ void Create_Text_Unit(void)
     if (!ts) return;
     memset(ts, 0, sizeof(text_state_t));
 
-    uint8_t *ext = fatfs_get_extension(chosen_file_path);
+    uint8_t ext_buf[8];
+    uint8_t *ext = fatfs_get_extension(chosen_file_path, ext_buf, sizeof(ext_buf));
 
     if (ext != NULL) {
         if (strcmp((char*)ext, "txt") == 0) {

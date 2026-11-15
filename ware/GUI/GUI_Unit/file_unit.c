@@ -189,10 +189,9 @@ static void reset_op_state(void) {
         free_bsc(op_path);
         op_path = NULL;
     }
-    // 清理异步操作路径 (仅在无活跃后台操作时释放)
-    if (!g_file_op_busy) {
-        if (g_async_src) { free_bsc(g_async_src); g_async_src = NULL; }
-        if (g_async_dst) { free_bsc(g_async_dst); g_async_dst = NULL; }
+    /* 路径缓冲提交后由后台任务独占并释放, 这里不再经手。
+     * 进度结构体只在确认没有活跃操作时回收。 */
+    if (!FileOp_Is_Busy()) {
         if (op_progress) { free_bsc(op_progress); op_progress = NULL; }
     }
 }
@@ -222,23 +221,25 @@ static void op_btn_event_cb(lv_event_t * e) {
 
             // 检查目标路径是否与源路径相同，避免自我复制
             if (strncmp(target, op_path, strlen(op_path)) != 0) {
-                // 分配内存
-                g_async_src = malloc_bsc(strlen(op_path) + 1);
-                g_async_dst = malloc_bsc(strlen(target) + 1);
+                // 分配内存: 路径由本地指针持有, 提交成功后所有权交给后台任务
+                char *src = malloc_bsc(strlen(op_path) + 1);
+                char *dst = malloc_bsc(strlen(target) + 1);
                 op_progress = malloc_bsc(sizeof(file_op_progress_t));
                 if (op_progress) memset(op_progress, 0, sizeof(file_op_progress_t));
 
-                if (g_async_src && g_async_dst && op_progress) {
-                    strcpy(g_async_src, op_path);
-                    strcpy(g_async_dst, target);
-                    g_file_op_cmd  = 1;  // 复制
-                    g_file_op_busy = 1;
-                    g_file_op_done = 0;
-                    xTaskNotifyGive(FileOp_Task_handler);
+                if (src && dst && op_progress) {
+                    strcpy(src, op_path);
+                    strcpy(dst, target);
+                    if (!FileOp_Submit(1, src, dst)) {   // 1 = 复制
+                        free_bsc(src);
+                        free_bsc(dst);
+                        free_bsc(op_progress);
+                        op_progress = NULL;
+                    }
                 } else {
                     // 分配失败则清理
-                    if (g_async_src) { free_bsc(g_async_src); g_async_src = NULL; }
-                    if (g_async_dst) { free_bsc(g_async_dst); g_async_dst = NULL; }
+                    if (src) free_bsc(src);
+                    if (dst) free_bsc(dst);
                     if (op_progress) { free_bsc(op_progress); op_progress = NULL; }
                 }
             }
@@ -252,19 +253,20 @@ static void op_btn_event_cb(lv_event_t * e) {
         } else if (op_mode == OP_DEL_WAITING) {
             reset_op_state();
         } else if (op_mode == OP_DEL_READY && op_path) {
-            // 分配内存
-            g_async_src = malloc_bsc(strlen(op_path) + 1);
+            // 分配内存: 路径由本地指针持有, 提交成功后所有权交给后台任务
+            char *src = malloc_bsc(strlen(op_path) + 1);
             op_progress = malloc_bsc(sizeof(file_op_progress_t));
             if (op_progress) memset(op_progress, 0, sizeof(file_op_progress_t));
 
-            if (g_async_src && op_progress) {
-                strcpy(g_async_src, op_path);
-                g_file_op_cmd  = 2;  // 删除
-                g_file_op_busy = 1;
-                g_file_op_done = 0;
-                xTaskNotifyGive(FileOp_Task_handler);
+            if (src && op_progress) {
+                strcpy(src, op_path);
+                if (!FileOp_Submit(2, src, NULL)) {   // 2 = 删除
+                    free_bsc(src);
+                    free_bsc(op_progress);
+                    op_progress = NULL;
+                }
             } else {
-                if (g_async_src) { free_bsc(g_async_src); g_async_src = NULL; }
+                if (src) free_bsc(src);
                 if (op_progress) { free_bsc(op_progress); op_progress = NULL; }
             }
             reset_op_state();
@@ -291,7 +293,7 @@ static void update_op_buttons(void) {
         lv_obj_clear_flag(btn_delete, LV_OBJ_FLAG_HIDDEN);
     }
 
-    if (g_file_op_busy) {
+    if (FileOp_Is_Busy()) {
         lv_obj_add_state(btn_copy, LV_STATE_DISABLED);
         lv_obj_add_state(btn_paste, LV_STATE_DISABLED);
         lv_obj_add_state(btn_delete, LV_STATE_DISABLED);
@@ -660,11 +662,9 @@ void Update_File_Unit(void)
 {
     if (file_unit_cont == NULL) return;
 
-    // 检测后台文件操作是否完成
-    static uint8_t was_busy = 0;
-    if (was_busy && !g_file_op_busy) {
-        // 操作刚完成，刷新文件列表并关闭弹窗
-        g_file_op_done = 0;
+    // 检测后台文件操作是否完成: 取出结果的同时清完成标志, 同一结果不重复处理
+    uint8_t op_res = FILEOP_RES_OK;
+    if (FileOp_Take_Result(&op_res)) {
         Update_File();
         if (op_win) {
             lv_obj_del(op_win);
@@ -676,10 +676,9 @@ void Update_File_Unit(void)
             op_progress = NULL;
         }
     }
-    was_busy = g_file_op_busy;
 
     // ======== 显示进度操作弹窗 ========
-    if (g_file_op_busy && op_progress) {
+    if (FileOp_Is_Busy() && op_progress) {
         if (op_win == NULL) {
             op_win = lv_obj_create(file_unit_cont); // 挂载在主容器上
             lv_obj_set_size(op_win, 180, 80);
@@ -697,7 +696,7 @@ void Update_File_Unit(void)
 
             lv_obj_t * title = lv_label_create(op_win);
             lv_obj_set_style_text_font(title, &lv_font_12, 0); 
-            lv_label_set_text(title, (g_file_op_cmd == 1) ? "正在复制..." : "正在删除...");
+            lv_label_set_text(title, (FileOp_Get_Cmd() == 1) ? "正在复制..." : "正在删除...");
             lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
             op_label = lv_label_create(op_win);
@@ -723,7 +722,7 @@ void Update_File_Unit(void)
             }
             
             // 持续刷新进度百分比
-            if (g_file_op_cmd == 1) { // 复制
+            if (FileOp_Get_Cmd() == 1) { // 复制
                 if (op_progress->total_bytes > 0) {
                     uint32_t pct = (uint32_t)(((unsigned long long)op_progress->cur_bytes * 100) / op_progress->total_bytes);
                     lv_bar_set_value(op_bar, pct, LV_ANIM_OFF);
@@ -760,7 +759,8 @@ void Update_File_Unit(void)
 
     if(g_file_chosen)
     {
-        uint8_t *ext = fatfs_get_extension(chosen_file_path);
+        uint8_t ext_buf[8];
+        uint8_t *ext = fatfs_get_extension(chosen_file_path, ext_buf, sizeof(ext_buf));
 
         if (ext != NULL)
         {
@@ -829,20 +829,18 @@ void Remove_File_Unit(void)
         free_bsc(current_path);
         current_path = NULL;
     }
-    /* 后台 FileOp 任务还在跑(do_copy/do_delete)时, 它正通过 op_progress
-     * 累加进度、通过 g_async_src/g_async_dst 读路径。这里无条件 free 的话,
-     * 后台任务随后就写进已释放的块 → UAF / TLSF 块头被踩。
-     * 统一交给 reset_op_state(): 它按 g_file_op_busy 决定"现在释放"还是
-     * "留给 FileOp 任务收尾时释放"。 */
+    /* 后台任务可能仍在用 op_progress 累加进度。这里不能直接 free,
+     * 统一交给 reset_op_state(): 它在确认没有活跃操作后才回收。
+     * 页面退出期间仍在跑的那一次, 由 FileOp_Task 收尾时调 reclaim 补回收。 */
     reset_op_state(); 
 }
 
-/* 后台操作收尾时的统一回收点 (由 FileOp_Task 在 g_file_op_busy=0 之后调用)。
+/* 后台操作收尾时的统一回收点 (由 FileOp_Task 在操作结束后调用)。
  * 页面已经退出时 Remove_File_Unit() 不敢 free op_progress(后台还在用),
  * 那些块就由这里在"确实没有人在用"之后回收, 避免每做一次复制/删除漏 300B。 */
 void file_op_progress_reclaim(void)
 {
-    if (g_file_op_busy) return;      // 还有新一轮操作在跑, 不能动
+    if (FileOp_Is_Busy()) return;    // 还有新一轮操作在跑, 不能动
     if (op_progress) { free_bsc(op_progress); op_progress = NULL; }
     if (file_unit_cont == NULL) {    // 页面已退出: 停止刷新已不存在的 UI 对象
         op_win = op_label = op_bar = NULL;

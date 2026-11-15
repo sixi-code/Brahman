@@ -9,6 +9,7 @@
 #include "page_manager.h"
 #include "ff.h"
 #include "note_unit.h"
+#include "file_unit.h"   // FileOp_Submit / FileOp_Is_Busy / FileOp_Take_Result
 
 // 「还没保存」确认框是否在等答复
 #define NOTE_ASK_NONE  0 // 无
@@ -292,7 +293,7 @@ static void note_load_from_file(void)
 static uint8_t note_submit_save(const char * name)
 {
 	if (ns == NULL || ns->ta_note == NULL) return FILEOP_RES_FAIL;
-	if (g_file_op_busy) return FILEOP_RES_FAIL;// 后台正忙
+	if (FileOp_Is_Busy()) return FILEOP_RES_FAIL;// 后台正忙
 	if (FileOp_Task_handler == NULL) return FILEOP_RES_FAIL;// 任务还没起来
 	// 卡没插时那个任务还在等 g_TFcard_inited, 根本不会进主循环;
 	// 这时候提交会让 busy 永远不落, 页面就卡死了 ⇒ 直接判"卡不可用"
@@ -315,12 +316,12 @@ static uint8_t note_submit_save(const char * name)
 	// 收掉键盘: 写盘期间不能再改正文(改动不在这次快照里, 写完之后就会被 dirty=0 抹掉)
 	Close_Keyboard();
 
-	g_async_src    = src;
-	g_async_dst    = dst;
-	g_file_op_cmd  = 3;// 写文本文件
-	g_file_op_busy = 1;
-	g_file_op_done = 0;
-	xTaskNotifyGive(FileOp_Task_handler);
+	// 提交给后台任务; 成功后路径与正文的所有权转交, 本页面不再持有
+	if (!FileOp_Submit(3, src, dst)) {   // 3 = 写文本文件
+		free_bsc(src);
+		free_bsc(dst);
+		return FILEOP_RES_FAIL;
+	}
 
 	ns->save_pending = 1;
 	return FILEOP_RES_OK;
@@ -386,13 +387,14 @@ void Update_Note_Unit(void)
 	if (ns == NULL) return;
 
 	// 后台写盘完成了就收尾(写盘不在 LVGL 任务里做)
-	if (ns->save_pending && !g_file_op_busy) {
-		uint8_t res = g_file_op_result;
-		g_file_op_done = 0;
-		ns->save_pending = 0;
-		if (res == FILEOP_RES_OK) note_save_ok();
-		else note_save_err(res);
-		return;
+	if (ns->save_pending) {
+		uint8_t res = FILEOP_RES_OK;
+		if (FileOp_Take_Result(&res)) {
+			ns->save_pending = 0;
+			if (res == FILEOP_RES_OK) note_save_ok();
+			else note_save_err(res);
+			return;
+		}
 	}
 
 	Update_Keyboard();

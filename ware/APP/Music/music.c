@@ -104,7 +104,8 @@ static uint8_t scan_music_dir(uint16_t index_to_find, FILINFO* info_out, uint8_t
         
         if (file_info.fattrib & (AM_DIR | AM_HID)) continue;// 跳过子目录与隐藏项
 
-        uint8_t* ext = fatfs_get_extension(file_info.fname);// 取出扩展名
+        uint8_t ext_buf[8];
+        uint8_t* ext = fatfs_get_extension(file_info.fname, ext_buf, sizeof(ext_buf));// 取出扩展名
         uint8_t fmt = get_file_format((char*)ext);// 后缀 -> 格式编号(0=不支持)
         
         if (fmt != 0) 
@@ -231,7 +232,8 @@ uint8_t play_specific_song(const char* filepath)
         
         if (file_info.fattrib & (AM_DIR | AM_HID)) continue;// 跳过子目录与隐藏项
 
-        uint8_t* ext = fatfs_get_extension(file_info.fname);// 取出扩展名
+        uint8_t ext_buf[8];
+        uint8_t* ext = fatfs_get_extension(file_info.fname, ext_buf, sizeof(ext_buf));// 取出扩展名
         uint8_t fmt = get_file_format((char*)ext);// 后缀 -> 格式编号(0=不支持)
         
         if (fmt != 0) 
@@ -308,7 +310,8 @@ uint8_t audio_play_prepare(void)
             
             if (file_info.fattrib & (AM_DIR | AM_HID)) continue; // 跳过子目录与隐藏项
 
-            uint8_t* ext = fatfs_get_extension(file_info.fname);// 取出扩展名
+            uint8_t ext_buf[8];
+            uint8_t* ext = fatfs_get_extension(file_info.fname, ext_buf, sizeof(ext_buf));// 取出扩展名
             uint8_t fmt = get_file_format((char*)ext);// 后缀 -> 格式编号(0=不支持)
             
             if(fmt != 0) 

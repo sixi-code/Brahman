@@ -34,7 +34,8 @@ static album_state_t * album_state = NULL;
 // 清单与媒体任务(media_task.c)的分派保持一致，确保选中后交给它一定能被正确解码
 static uint8_t album_ext_supported(const char *name)
 {
-    uint8_t * ext = fatfs_get_extension(name);
+    uint8_t ext_buf[8];
+    uint8_t * ext = fatfs_get_extension(name, ext_buf, sizeof(ext_buf));
 
     return (strcmp((char *)ext, "bmp")   == 0) ||
            (strcmp((char *)ext, "jpg")   == 0) ||
@@ -54,7 +55,8 @@ static void load_current_image(void)
     const char * path = album_state->img_paths[album_state->current_idx];
 
     // 页内只打开了 BMP 解码器，可直接预览；其余后缀页内无解码器，显示文件名待「确定」播放
-    uint8_t * ext = fatfs_get_extension(path);
+    uint8_t ext_buf[8];
+    uint8_t * ext = fatfs_get_extension(path, ext_buf, sizeof(ext_buf));
     if (strcmp((char *)ext, "bmp") == 0) {
         if (album_state->img_obj) {
             lv_obj_clear_flag(album_state->img_obj, LV_OBJ_FLAG_HIDDEN);

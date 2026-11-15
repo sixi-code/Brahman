@@ -5,11 +5,13 @@
 #include <stdbool.h>
 #include <stddef.h> // 需要用到 NULL
 
-// 页面状态枚举
+/* 页面状态。
+ * 只保留两个状态: 离开页面时一定会调用 exit() 释放对象, 所以不存在
+ * "已初始化但未激活"的中间态。之前多出来的那个枚举值从未被写入过,
+ * 容易让人误以为页面会被缓存复用 —— 实际每次进入都会重新 init。 */
 typedef enum {
-    PAGE_STATE_UNINIT = 0,  // 未初始化
-    PAGE_STATE_INIT,        // 已初始化
-    PAGE_STATE_ACTIVE,      // 活跃中
+    PAGE_STATE_UNINIT = 0,  // 未初始化(对象不存在)
+    PAGE_STATE_ACTIVE,      // 活跃中(对象已创建)
 } Page_State_t;
 
 // 页面接口结构体

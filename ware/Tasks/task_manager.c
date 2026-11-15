@@ -30,8 +30,66 @@ static const Task_Registry_t Task_List[] = {
 
 #define TASK_NUM_MAX (sizeof(Task_List) / sizeof(Task_List[0]))//任务数量最大值
 
+/* ===== 请求队列 =====
+ * 控制请求不能直接写状态变量: 状态变量是 Task_Manager 与执行者共用的单个字节,
+ * 连发两条请求(比如挂起后立刻恢复)时前一条会被覆盖, 任务实际状态与状态变量
+ * 就此背离, 之后所有判断都基于错误前提。
+ * 这里用固定长度的环形队列按"每个任务至多一条待处理请求"合并:
+ * 新请求覆盖同任务的旧请求(最新意图优先), 不同任务之间保持到达顺序。
+ * 队列不用动态内存, 不占用 FreeRTOS 堆, 也不受 CCM 池水位影响。 */
+#define TASK_REQ_QUEUE_LEN 8
+
+typedef struct {
+    uint8_t task_num;
+    uint8_t action;
+} task_req_t;
+
+static task_req_t          req_queue[TASK_REQ_QUEUE_LEN];
+static volatile uint8_t    req_count = 0;
+static volatile uint8_t    req_drop  = 0;   // 队列满被丢弃的请求数, 便于现场判断
+
+/* 队列操作必须在临界区内完成, 调用者负责保护 */
+static void req_push_locked(uint8_t task_num, uint8_t action)
+{
+    uint8_t i;
+
+    for (i = 0; i < req_count; i++) {
+        if (req_queue[i].task_num == task_num) {
+            req_queue[i].action = action;   // 同任务: 最新意图覆盖
+            return;
+        }
+    }
+
+    if (req_count >= TASK_REQ_QUEUE_LEN) {
+        req_drop++;
+        return;
+    }
+
+    req_queue[req_count].task_num = task_num;
+    req_queue[req_count].action   = action;
+    req_count++;
+}
+
+/* 取出一条请求, 队列空时返回 0 */
+static uint8_t req_pop_locked(task_req_t *out)
+{
+    uint8_t i;
+
+    if (req_count == 0 || out == NULL) return 0;
+
+    out->task_num = req_queue[0].task_num;
+    out->action   = req_queue[0].action;
+
+    for (i = 1; i < req_count; i++) {
+        req_queue[i - 1] = req_queue[i];
+    }
+    req_count--;
+
+    return 1;
+}
+
 /**
- * @brief 触发任务管理器，更改任务状态
+ * @brief 触发任务管理器，提交一条控制请求
  * @param task_num 任务编号 (Task_N_xxx)
  * @param task_action 任务动作 (Task_T_xxx)
  * @param IsFromISR 是否来自中断上下文
@@ -40,18 +98,34 @@ void Taskmanager_Ctrl(uint8_t task_num, uint8_t task_action, uint8_t IsFromISR)
 {
     if (task_num >= TASK_NUM_MAX) return;
 
-    *(Task_List[task_num].status_ptr) = task_action;
-
-    if (IsFromISR) 
+    if (IsFromISR)
     {
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xSemaphoreGiveFromISR(xTaskManagerSemaphore, &xHigherPriorityTaskWoken);
-        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+        UBaseType_t saved = portSET_INTERRUPT_MASK_FROM_ISR();
+        req_push_locked(task_num, task_action);
+        portCLEAR_INTERRUPT_MASK_FROM_ISR(saved);
+
+        {
+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+            xSemaphoreGiveFromISR(xTaskManagerSemaphore, &xHigherPriorityTaskWoken);
+            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+        }
     }
     else
     {
+        taskENTER_CRITICAL();
+        req_push_locked(task_num, task_action);
+        taskEXIT_CRITICAL();
+
         xSemaphoreGive(xTaskManagerSemaphore);
     }
+}
+
+/**
+ * @brief 查询被丢弃的请求数量(仅用于诊断)
+ */
+uint8_t Taskmanager_Get_Dropped(void)
+{
+    return req_drop;
 }
 
 /**
@@ -88,14 +162,30 @@ void Task_Manager( void * pvParameters )
 {
     while (1)
     {
-        // 阻塞等待外部使能指令
+        task_req_t req;
+
+        // 阻塞等待外部请求
         xSemaphoreTake(xTaskManagerSemaphore, portMAX_DELAY);
 
-        // 遍历所有注册的任务，处理其状态机
-        for (uint8_t i = 0; i < TASK_NUM_MAX; i++)
+        // 逐条取出并执行, 直到队列空
+        while (1)
         {
-            uint8_t current_action = *(Task_List[i].status_ptr);
-            TaskHandle_t *pHandle = Task_List[i].handle_ptr;
+            uint8_t i;
+            uint8_t current_action;
+            TaskHandle_t *pHandle;
+
+            taskENTER_CRITICAL();
+            if (!req_pop_locked(&req)) {
+                taskEXIT_CRITICAL();
+                break;
+            }
+            taskEXIT_CRITICAL();
+
+            i = req.task_num;
+            if (i >= TASK_NUM_MAX) continue;
+
+            current_action = req.action;
+            pHandle = Task_List[i].handle_ptr;
 
             switch (current_action)
             {
@@ -126,21 +216,35 @@ void Task_Manager( void * pvParameters )
                 case Task_T_Suspend:
                     if (*pHandle != NULL) {
                         vTaskSuspend(*pHandle);
+                        *(Task_List[i].status_ptr) = Task_P_Stop;
+                    } else {
+                        /* 任务本来就不在(从未创建或已自删): 状态如实写空,
+                         * 不能让状态变量停在"运行中"误导后续判断。 */
+                        *(Task_List[i].status_ptr) = Task_P_Null;
                     }
-                    *(Task_List[i].status_ptr) = Task_P_Stop;
                     break;
 
                 case Task_T_Resume:
-                    if (*pHandle != NULL) {
+                    /* 只有确实处于挂起态才恢复, 避免对运行中的任务重复 vTaskResume */
+                    if (*pHandle != NULL && eTaskGetState(*pHandle) == eSuspended) {
                         vTaskResume(*pHandle);
+                        *(Task_List[i].status_ptr) = Task_P_Running;
                     }
-                    *(Task_List[i].status_ptr) = Task_P_Running;
                     break;
 
                 case Task_T_Delete:
                     if (*pHandle != NULL) {
-                        vTaskDelete(*pHandle);
-                        *pHandle = NULL; 
+                        /* 先收回句柄再删, 删除自身会让 TCB 立即释放,
+                         * 之后任何对 *pHandle 的比较都落在已回收内存上 */
+                        TaskHandle_t self = xTaskGetCurrentTaskHandle();
+                        if (*pHandle == self) {
+                            *pHandle = NULL;
+                            *(Task_List[i].status_ptr) = Task_P_Null;
+                            vTaskDelete(NULL);
+                        } else {
+                            vTaskDelete(*pHandle);
+                            *pHandle = NULL;
+                        }
                     }
                     *(Task_List[i].status_ptr) = Task_P_Null;
                     break;

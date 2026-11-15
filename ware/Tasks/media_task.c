@@ -26,7 +26,8 @@ void Media_Task( void * pvParameters )
 
     Delay_ms(50);
 
-    uint8_t *ext = fatfs_get_extension(chosen_file_path);
+    uint8_t ext_buf[8];
+    uint8_t *ext = fatfs_get_extension(chosen_file_path, ext_buf, sizeof(ext_buf));
 
     g_lcd_user = LCD_USER_MDIA;
     Taskmanager_Ctrl(Task_N_LVGL, Task_T_Suspend, 0);

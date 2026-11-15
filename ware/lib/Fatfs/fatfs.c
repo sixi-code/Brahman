@@ -64,19 +64,23 @@ uint8_t fatfs_unmount(uint8_t pdrv)
 
 // ================= 保留原来的函数 =================
 
-// 计算容量  "0:" "1:" 总容量 剩余容量
-uint8_t fatfs_get_space(const char *drv, uint16_t *total, uint16_t *free)
+/* 计算容量: "0:" / "1:" 的总容量与剩余容量, 单位 MB。
+ * 用 uint32_t 而不是 uint16_t —— FAT32 上 64GB 卡的总量超过 65535 MB, 会被截断。 */
+uint8_t fatfs_get_space(const char *drv, uint32_t *total, uint32_t *free)
 {
 	FATFS *fs1;
 	uint8_t res;
     uint32_t fre_clust = 0, fre_sect = 0, tot_sect = 0;
+
+    if (drv == NULL || total == NULL || free == NULL) return 1;
+
     res = (uint32_t)f_getfree((const char*)drv, (uint32_t*)&fre_clust, &fs1);
     if(res == 0)
-	{											   
+	{
 	    tot_sect = (fs1->n_fatent - 2) * fs1->csize;
-	    fre_sect = fre_clust * fs1->csize;		 
-		*total = (uint16_t)(tot_sect >> 11); // >>11 相当于除以 2048 (针对512字节扇区转换为MB)
-		*free  = (uint16_t)(fre_sect >> 11);
+	    fre_sect = fre_clust * fs1->csize;
+		*total = (uint32_t)(tot_sect >> 11); // >>11 = 除以 2048, 即 512B 扇区折算成 MB
+		*free  = (uint32_t)(fre_sect >> 11);
  	}
 	return res;
 }
@@ -84,18 +88,25 @@ uint8_t fatfs_get_space(const char *drv, uint16_t *total, uint16_t *free)
 /**
  * @brief 从路径或文件名中提取文件扩展名（后缀）
  * @param path 文件路径（可包含目录）或纯文件名
- * @return 扩展名字符串（小写），若没有扩展名则返回空字符串
+ * @param ext  调用方提供的输出缓冲, 至少 8 字节
+ * @param cap  输出缓冲字节数; 最多写入 cap-1 个字符再补 '\0'
+ * @return 传入的 ext 指针（便于链式调用）, 若没有扩展名则内容为空串
+ *
+ * 输出由调用方提供, 函数本身不保存任何静态状态, 因此可被多个任务同时调用。
  */
-uint8_t* fatfs_get_extension(const char *path)
+uint8_t* fatfs_get_extension(const char *path, uint8_t *ext, size_t cap)
 {
-    static uint8_t ext[8];  // 最多7字符后缀 + '\0'
-    memset(ext, 0, sizeof(ext));
-    
-    if (path == NULL) return ext;
-    
-    // 1. 提取文件名（最后一个 '/' 或 '\\' 之后的部分）
     const char *fname = path;
     const char *last_sep = NULL;
+    const char *dot;
+    size_t copy_len;
+
+    if (ext == NULL || cap == 0) return ext;
+    memset(ext, 0, cap);
+
+    if (path == NULL) return ext;
+
+    // 1. 提取文件名（最后一个 '/' 或 '\\' 之后的部分）
     for (const char *p = path; *p; p++) {
         if (*p == '/' || *p == '\\') {
             last_sep = p;
@@ -104,14 +115,14 @@ uint8_t* fatfs_get_extension(const char *path)
     if (last_sep != NULL) {
         fname = last_sep + 1;
     }
-    
+
     // 2. 查找最后一个 '.'
-    const char *dot = strrchr(fname, '.');
+    dot = strrchr(fname, '.');
     if (dot && dot != fname && *(dot+1) != '\0') {
         const char *ext_start = dot + 1;
         size_t ext_len = strlen(ext_start);
-        size_t copy_len = ext_len > 7 ? 7 : ext_len;  // 最多7字符
-        
+        copy_len = ext_len > (cap - 1) ? (cap - 1) : ext_len;
+
         for (size_t i = 0; i < copy_len; i++) {
             ext[i] = (uint8_t)tolower(ext_start[i]);
         }
