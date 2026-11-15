@@ -237,7 +237,10 @@ void Update_Album_Unit(void)
     if (g_file_chosen)
     {
         g_file_chosen = 0;
-        Taskmanager_Ctrl(Task_N_Media, Task_T_Creat, 0);
+        /* 已在播放则忽略重复创建: 否则 Media_Task 的历史栈会失衡 */
+        if (Media_Task_Status == Task_P_Null) {
+            Taskmanager_Ctrl(Task_N_Media, Task_T_Creat, 0);
+        }
     }
 }
 

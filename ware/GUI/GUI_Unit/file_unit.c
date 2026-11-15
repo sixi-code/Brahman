@@ -773,13 +773,20 @@ void Update_File_Unit(void)
 				strcmp((char*)ext, "avi")   == 0 ||
                 strcmp((char*)ext, "gif")   == 0) {
                 g_file_chosen = 0;
-                Taskmanager_Ctrl(Task_N_Media, Task_T_Creat, 0);
+                /* 播放中(任务已存在)再次入口会让 Media_Task 的历史栈 push 被跳过、
+                 * 退出时 Page_Back() 却照常弹栈 —— 之后每返回一次都错一页。
+                 * 只在任务处于空态时才创建。 */
+                if (Media_Task_Status == Task_P_Null) {
+                    Taskmanager_Ctrl(Task_N_Media, Task_T_Creat, 0);
+                }
                 return;
             }
 
             if (strcmp((char*)ext, "nes") == 0) {
                 g_file_chosen = 0;
-                Taskmanager_Ctrl(Task_N_Game, Task_T_Creat, 0);
+                if (Game_Task_Status == Task_P_Null) {   // 同上: 已在游戏中则忽略
+                    Taskmanager_Ctrl(Task_N_Game, Task_T_Creat, 0);
+                }
                 return;
             }
 

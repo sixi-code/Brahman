@@ -190,23 +190,22 @@ static bool bootuf2block_check_writable(struct bootuf2_STATE *STATE,
     return false;
 }
 
-/* 一次升级里 NumberOfBlock 只允许从 0 设置一次。
- * 若主机发来第二个不同的 NumberOfBlock, 就把 NumberOfBlock 打成 0xffffffff
- * 让会话永不完成 —— 宁可重来, 也不能把两份固件拼在一起烧进去。
- * 换文件时 Mask 必须同步清空, 否则新文件的块会被上一轮的 mask 位跳过,
- * 结果是固件缺块却仍自动重启。 */
+/* 会话状态维护。
+ * 同一上电周期内允许先后刷入两个不同的固件: 块数一变就当作"换了文件",
+ * 清空掩码与进度重新计。只有块数本身非法(超过上限)才把会话打成永不完成 ——
+ * 那种情况下主机发的块索引本身就不可信, 不能靠它判断进度。
+ * 清空掩码是必须的: 否则新文件的块会被上一轮的掩码位跳过, 结果是固件缺块
+ * 却仍然自动重启。 */
 static void bootuf2block_state_update(struct bootuf2_STATE *STATE,
                                       struct bootuf2_BLOCK *uf2, uint32_t block_max)
 {
     if (uf2->NumberOfBlock) {
         if (STATE->NumberOfBlock != uf2->NumberOfBlock) {
-            if ((uf2->NumberOfBlock >= BOOTUF2_BLOCKSMAX) ||
-                STATE->NumberOfBlock) {
-                /*!< uf2 block only can be update once */
-                /*!< this will cause never auto reboot */
+            if (uf2->NumberOfBlock > BOOTUF2_BLOCKSMAX) {
+                /* 块数超出可升级区容量: 主机数据不可信, 让会话永不完成 */
                 STATE->NumberOfBlock = 0xffffffff;
             } else {
-                /* 换了一个全新的升级文件: 清掉上一轮的进度, 否则会带错掩码 */
+                /* 换了新的升级文件: 清掉上一轮进度与掩码, 从 0 重新开始 */
                 memset(STATE->Mask, 0, (BOOTUF2_BLOCKSMAX / 8) + 1);
                 STATE->NumberOfWritten = 0;
                 STATE->NumberOfBlock = uf2->NumberOfBlock;
