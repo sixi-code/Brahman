@@ -7,6 +7,7 @@
 #include "stm32f4xx.h"
 #include "bootuf2.h"
 #include "boot_marker.h"
+#include "img_crc.h"
 #include "usbd_core.h"
 
 /* ===== 升级掉电标记 =====
@@ -53,6 +54,7 @@ struct bootuf2_data {
     const size_t cache_size;
     uint32_t cached_address;
     size_t cached_bytes;
+    uint32_t image_end;      /* 已写入数据的末端地址, 用于封盘时算镜像长度 */
 };
 
 /*!< define DBRs */
@@ -284,6 +286,11 @@ int bootuf2_flash_write_internal(struct bootuf2_data *ctx, struct bootuf2_BLOCK 
     ctx->cached_address = uf2->TargetAddress - ctx->cached_bytes;
     ctx->cached_bytes += uf2->PayloadSize;
 
+    /* 记录数据末端; 各块可能乱序到达, 所以取最大值 */
+    if (uf2->TargetAddress + uf2->PayloadSize > ctx->image_end) {
+        ctx->image_end = uf2->TargetAddress + uf2->PayloadSize;
+    }
+
     return 0;
 }
 
@@ -297,6 +304,7 @@ void bootuf2_init(void)
 
     ctx->cached_bytes = 0;
     ctx->cached_address = 0;
+    ctx->image_end = 0;
 
     /* 显式清空升级状态与掩码。
      * 上电周期内软件复位会重新执行到这里, 残留的 Mask 位会让主机重发的块被判为
@@ -536,7 +544,19 @@ bool bootuf2_is_write_done(void)
             bootuf2_disk.STATE->NumberOfBlock = 0xFFFFFFFF;  // 标记永不完成, 主机重拖
             return false;
         }
-        /* 全部块写完整: 标记完成, 下次上电允许跳转 APP */
+        /* 全部块写完: 先封盘记录镜像 CRC, 回读通过后才认为升级成功。
+         * 顺序很重要 —— 记录没落盘就置 DONE, 下次上电会因缺记录而按"无记录"
+         * 放行, 等于白校验。 */
+        if (bootuf2_disk.image_end > CONFIG_BOOTUF2_APP_START) {
+            uint32_t img_len = bootuf2_disk.image_end - CONFIG_BOOTUF2_APP_START;
+            if (Img_Crc_Seal(CONFIG_BOOTUF2_APP_START, img_len) != 0) {
+                USB_LOG_ERR("UF2 crc seal failed\r\n");
+                bootuf2_disk.STATE->NumberOfBlock = 0xFFFFFFFF;
+                return false;
+            }
+        }
+
+        /* 标记完成, 下次上电允许跳转 APP */
         Boot_Marker_Set(BOOT_MARK_DONE);
         USB_LOG_DBG("UF2 update ok\r\n");
         return true;

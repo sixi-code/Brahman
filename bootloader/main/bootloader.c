@@ -6,6 +6,7 @@
 #include "bootuf2.h"
 #include "bootuf2_config.h"
 #include "boot_marker.h"
+#include "img_crc.h"
 #include "systick_conf.h"
 #include "lcd_bsp.h"
 #include "malloc.h"
@@ -14,6 +15,11 @@
 
 #define APP_ADDRESS CONFIG_BOOTUF2_APP_START   // 与 UF2/Flash 写入校验共用
 typedef void (*pFunction)(void);
+
+/* 下面两处在文件末尾定义; 镜像无效时要在 Jump_To_Main 里进入 UF2 模式,
+ * 所以先在这里声明。 */
+TaskHandle_t Task_handler;
+void Task( void * pvParameters );
 
 /* 跳转前三道校验: 栈顶在 SRAM、复位向量在 APP 区、复位向量是 Thumb 地址。
  * 半擦除的镜像常出现栈顶合法但复位向量为 0xFFFFFFFF 或奇数, 只查栈顶会跳进
@@ -27,7 +33,13 @@ void Jump_To_Main(void)
     uint8_t pc_ok = (app_pc >= APP_ADDRESS) && (app_pc < 0x08100000);      // 必须在 APP 区且为 1MB Flash 内
     uint8_t thumb_ok = ((app_pc & 1u) != 0);                               // Cortex-M 的向量必须是 Thumb(bit0=1)
 
-    if (sp_ok && pc_ok && thumb_ok)
+    /* 向量合法不代表内容完整: 掉电可能只写坏了中间某段而首字恰好没坏。
+     * 有 CRC 记录时必须整镜像校验通过才跳转, 避免跑半截固件。
+     * 返回 1 表示没有记录(旧流程烧录的固件), 此时按向量校验结果放行。 */
+    uint8_t crc_state = Img_Crc_Verify(APP_ADDRESS, CONFIG_BOOTUF2_FLASHMAX);
+    uint8_t crc_ok = (crc_state == 0) || (crc_state == 1);
+
+    if (sp_ok && pc_ok && thumb_ok && crc_ok)
     {
         /* 跳转前清干净 Bootloader 用过的中断与外设状态:
          * OTG_HS 的 DMA 仍在跑、NVIC 还有 pending 位、SysTick 仍在计数,
@@ -63,13 +75,16 @@ void Jump_To_Main(void)
     }
 	else
 	{
-		/* 镜像无效: 留在 Bootloader 等主机重新拖入 UF2 */
+		/* 镜像无效(向量不合法或 CRC 不符): 不跳转, 停在 Bootloader 等主机重刷。
+		 * 同时把"升级中"标记置回去, 下次上电也会自动进 UF2 模式。 */
+		Boot_Marker_Set(BOOT_MARK_UPGRADING);
+		msc_bootuf2_init(0, 0x40040000UL);
+		xTaskCreate(Task, "Task", 512, NULL, 3, &Task_handler);
+		vTaskStartScheduler();
+
 		while(1) { }
 	}
 }
-
-TaskHandle_t    Task_handler;
-void Task( void * pvParameters );
 
 int main(void)
 {

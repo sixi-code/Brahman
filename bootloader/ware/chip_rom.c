@@ -76,6 +76,10 @@ int bootuf2_flash_write(uint32_t address, const uint8_t *data, size_t size)
     uint32_t current_sector = GetSector(address);
     uint8_t sector_index = GetSectorIndex(current_sector);
 
+    /* 擦写期间 Flash 总线被占用, 而本函数就运行在 Flash 上:
+     * 不关中断的话, 期间到来的任何中断都会因取指失败而挂死。 */
+    __disable_irq();
+
     FLASH_Unlock();
     FLASH_ClearFlag(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR | 
                     FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
@@ -90,10 +94,12 @@ int bootuf2_flash_write(uint32_t address, const uint8_t *data, size_t size)
                              ((uint32_t)data[i+2] << 16) | ((uint32_t)data[i+3] << 24);
         if (FLASH_ProgramWord(address + i, word_data) != FLASH_COMPLETE) {
             FLASH_Lock();
+            __enable_irq();
             return -1; 
         }
     }
     
     FLASH_Lock();
+    __enable_irq();
     return 0;
 }
