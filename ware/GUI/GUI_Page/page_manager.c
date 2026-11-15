@@ -142,27 +142,44 @@ void _Page_Request_Switch_Impl(uint32_t new_page_id, const char *path, ...)
     if (Page_Get_Interface(new_page_id) != NULL) {
         // 页面传参: PAGE_FILE 传目录路径(文件管理器长期持有 current_path),
         // PAGE_NOTE / PAGE_CANVAS 传条目名(page_pick_name), 两者共用同一套按需分配
+        // (page_arg_set 内部会 malloc, 必须留在临界区外)
         if (new_page_id == PAGE_FILE) {
             page_arg_set(&current_path, path);
         } else if (new_page_id == PAGE_NOTE || new_page_id == PAGE_CANVAS) {
             page_arg_set(&page_pick_name, path);
         }
+        /* next_page_id/is_back_action 是与 Page_Manager_Loop(LVGL 任务)及
+         * 其它任务的 Page_Back 并发读改写的共享状态, 成对更新必须原子 */
+        taskENTER_CRITICAL();
         next_page_id = new_page_id;
         is_back_action = false;
+        taskEXIT_CRITICAL();
     }
 }
+
+/* can_exit 连续拦下的轮数(20ms/轮), 超过 150(约 3s) 放弃本次切换。
+ * 文件级静态: Page_Cancel_Switch 也要清它, 否则取消后的第一次新切换
+ * 会在弹窗刚弹出的同一帧就被放弃。 */
+static uint16_t block_ticks = 0;
 
 /* 只把目标页面拉回当前页面, 不碰页面传参缓冲。
  * 用于 can_exit 拦下切换 / init 失败回退这类"本次切换作废"的场合。 */
 void Page_Cancel_Switch(void)
 {
+    taskENTER_CRITICAL();
     next_page_id = current_page_id;
     is_back_action = false;   // 取消不算后退, 历史栈保持不动
+    block_ticks = 0;          // 取消也清宽限计数, 否则下次切换第一次被拦就被放弃
+    taskEXIT_CRITICAL();
 }
 
 // 触发后退功能
 void Page_Back(void)
 {
+    /* 摇杆(LVGL indev)与媒体/游戏/USB 任务都可能调本函数,
+     * history_count 的读-用-写与 next_page_id/is_back_action 的成对更新
+     * 必须原子, 否则两个并发 Page_Back 会双弹栈 */
+    taskENTER_CRITICAL();
     if (history_count > 0) {
         // 这里只"看一眼"栈顶, 真正弹栈留到 Page_Manager_Loop 里切换真的发生时做
         // (页面可以在切换前拦下并取消本次切换, 那时返回链不能被白白吃掉)
@@ -172,15 +189,20 @@ void Page_Back(void)
         next_page_id = PAGE_DESKTOP;
         is_back_action = true;
     }
+    taskEXIT_CRITICAL();
 }
 
 // 手动推入历史栈（用于 LVGL 被挂起前保存当前页面）
 // 用于不在 LVGL 管理的页面中手动保存当前页面状态
 void Page_Push_History(uint32_t page_id)
 {
+    /* 调用方在媒体/游戏/USB 任务里(LVGL 已挂起), 与 Loop 的历史记录逻辑并发,
+       计数与栈写入必须原子 */
+    taskENTER_CRITICAL();
     if (page_id > PAGE_DESKTOP && history_count < PAGE_HISTORY_MAX_DEPTH) {
         page_history_stack[history_count++] = page_id;
     }
+    taskEXIT_CRITICAL();
 }
 
 // 清除历史记录
@@ -204,7 +226,6 @@ void Page_Manager_Loop(void)
     // 切换前先询问当前页面是否允许离开(例如未保存的内容需要用户确认)
     // 被拦下时本帧不切换, 但仍继续执行下面的刷新逻辑, 让页面自己把确认弹窗处理完
     bool allow_switch = true;
-    static uint16_t block_ticks = 0;   // 被 can_exit 连续拦下的轮数(20ms/轮)
     if (current_page_id != target_next_id) {
         const Page_Interface_t* leaving_page = Page_Get_Interface(current_page_id);
         if (leaving_page && leaving_page->can_exit && !leaving_page->can_exit()) {
@@ -226,7 +247,8 @@ void Page_Manager_Loop(void)
 
     if (allow_switch && current_page_id != target_next_id)// 如果当前页面ID与目标页面ID不同，则进行切换
     {
-        // 历史记录逻辑
+        // 历史记录逻辑 (history_count/栈与其它任务的 Page_Back 并发, 计数变更须原子)
+        taskENTER_CRITICAL();
         if (!current_is_back) {
             if (target_next_id > PAGE_DESKTOP) {
                 if (current_page_id != 0 && history_count < PAGE_HISTORY_MAX_DEPTH) {
@@ -240,6 +262,7 @@ void Page_Manager_Loop(void)
         }
         
         is_back_action = false;
+        taskEXIT_CRITICAL();
 
         const Page_Interface_t* current_page = Page_Get_Interface(current_page_id);
         const Page_Interface_t* next_page = Page_Get_Interface(target_next_id);

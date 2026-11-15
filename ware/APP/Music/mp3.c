@@ -342,6 +342,9 @@ uint8_t mp3_play_song_prepare(uint8_t* fname)
 		I2S2_SampleRate_Set(mp3ctrl->samplerate);		//设置采样率 
 		I2S2_TX_DMA_Init(music_ctrl.i2sbuf1,music_ctrl.i2sbuf2,mp3ctrl->outsamples);//配置TX DMA
 		mp3decoder=MP3InitDecoder(); 					//MP3解码申请内存
+		if(mp3decoder == NULL) {
+			res = 3;   // 堆紧张时初始化失败: 不判空的话 Song_Playing 会对 NULL 解码, HardFault
+		}
 		res = f_open(music_ctrl.file,(char*)fname,FA_READ);	//打开文件
 
         music_info.total_sec = mp3ctrl->totsec;    // 总秒数
@@ -350,7 +353,7 @@ uint8_t mp3_play_song_prepare(uint8_t* fname)
         music_info.bit_depth = 16;                 // MP3解码通常输出16位
         music_info.current_sec = 0;                // 当前秒数清零
 	}
-	if(!res && !mp3decoder)//打开文件成功
+	if(!res && mp3decoder)//打开文件成功
 	{
 		f_lseek(music_ctrl.file,mp3ctrl->datastart);	//跳过文件头中tag信息
 	}

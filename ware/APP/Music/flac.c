@@ -76,12 +76,22 @@ uint8_t flac_init(FIL* fx, __flacctrl* fctrl)
         uint64_t total_samples = fx_flac_get_streaminfo(fctrl->decoder, FLAC_KEY_N_SAMPLES);// 总采样点数(FLAC 总时长可精确得到)
         uint32_t max_block_size = fx_flac_get_streaminfo(fctrl->decoder, FLAC_KEY_MAX_BLOCK_SIZE);// 最大块长度
         
-        fctrl->totsec = total_samples / fctrl->samplerate;// 总秒数 = 总采样点数 / 采样率
+        /* 畸形流(采样率 0 或总采样点数 0)直接按失败处理: 除零在 M4 上是
+           UsageFault, 而 UI 会拿 totsec 当进度条分母, 0 也会引发后续除零 */
+        if (fctrl->samplerate == 0 || total_samples == 0) {
+            res = 5;
+        } else {
+            fctrl->totsec = total_samples / fctrl->samplerate;
+        }
         fctrl->datastart = fx->fptr - in_buf_wr_cur;// 音频数据起始位置 = 当前文件指针 - 残留字节
         
         // 平均码率 = 音频数据字节数 * 8 / 总秒数
         uint32_t file_size = f_size(fx);// 文件总大小
-        fctrl->bitrate = ((file_size - fctrl->datastart) * 8) / fctrl->totsec;
+        if (res == 0 && fctrl->totsec > 0) {
+            fctrl->bitrate = ((file_size - fctrl->datastart) * 8) / fctrl->totsec;
+        } else if (res == 0) {
+            res = 5;
+        }
 		
 		// 定位到音频数据起始处,后续只读音频帧
 		f_lseek(fx,fctrl->datastart);

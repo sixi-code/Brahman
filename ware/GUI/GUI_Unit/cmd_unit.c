@@ -56,7 +56,8 @@ static cmd_state_t * cmd_state = NULL;
  * 敲一次回车就在 UI 线程里跑 fs/ls(遍历 SD 卡, 数百 ms), 界面冻结;
  * 如果命令里带长操作, 还会把 LVGL 任务和小键盘状态一起拖住。
  * 改成回调只登记一行, 由 Update_Cmd_Unit() 在下一帧执行。 */
-static uint8_t  g_cmd_req = 0;
+static uint8_t  g_cmd_req = 0;   // 0=无 1=执行命令行 2=Tab 补全
+static uint8_t  g_tab_req = 0;   // Tab 补全请求(与命令行互不覆盖)
 /* 命令行缓冲放在 cmd_state(堆/BSC) 里而不是静态区:
  * RW_IRAM1 现在只剩约 600B 余量, 能省 80B 就省 80B。 */
 #define g_cmd_line (cmd_state->cmd_line)
@@ -286,8 +287,9 @@ static void direct_mode_cb(lv_event_t * e)
 
 static void btn_tab_cb(lv_event_t * e)
 {
+    /* Tab 补全同样可能遍历 SD 目录(ls <TAB>), 只登记不执行 */
     if (cmd_state) {
-        shellHandler(&cmd_state->shell_obj, '\t');
+        g_tab_req = 1;
     }
 }
 
@@ -430,6 +432,10 @@ void Update_Cmd_Unit(void)
             shellHandler(&cmd_state->shell_obj, *p);
         }
         shellHandler(&cmd_state->shell_obj, '\r');
+    }
+    else if (g_tab_req) {
+        g_tab_req = 0;
+        shellHandler(&cmd_state->shell_obj, '\t');
     }
 
 	Update_Keyboard();

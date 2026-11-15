@@ -64,6 +64,7 @@ uint8_t nes_init(const char *path)
 	res = f_open(nes_file, path, FA_READ);
 	if(res != FR_OK) {
 		free_bsc(nes_file);
+		nes_file = NULL;   // 不置空的话 nes_deinit 会对已释放的 FIL 再 f_close + free
 		return 2;
 	}
 	

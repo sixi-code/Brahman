@@ -204,9 +204,23 @@ bool wordlist_get_by_index(wordlist_t *wl, uint32_t index, word_item_t *item)
 
     f_lseek(&wl->file, wl->line_offsets[index]);
 
-    char line_buf[256];
+    char line_buf[512];
     if (f_gets(line_buf, sizeof(line_buf), &wl->file) == NULL) {
         return false;
+    }
+
+    /* 行被 255 字节截断时(旧版 256 缓冲)内容不完整; 现在 512 仍不够时,
+     * 把本行剩余部分排干, 避免依赖"读指针恰好停在行尾"的隐式假设 ——
+     * 行索引只记行首, 每次都是 f_lseek(行首) 开始, 残余不影响下一条,
+     * 但排干能让将来新增的顺序读取方不踩坑。 */
+    size_t got = strlen(line_buf);
+    if (got > 0 && line_buf[got - 1] != '\n' && !f_eof(&wl->file)) {
+        char drain[32];
+        while (f_gets(drain, sizeof(drain), &wl->file) != NULL) {
+            size_t n = strlen(drain);
+            if (n > 0 && drain[n - 1] == '\n') break;
+            if (f_eof(&wl->file)) break;
+        }
     }
 
     parse_word_line(line_buf, item);

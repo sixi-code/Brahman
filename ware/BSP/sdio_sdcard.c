@@ -50,17 +50,23 @@ static void sdcard_unlock(void)
 	xSemaphoreGive(xSDcardMutex);
 }
 
-/* 对外的加锁/解锁: 供 FatFs 层(diskio.c)在"重试前重新初始化"时与数据通路互斥。
+/* 对外的加锁/解锁: 供 FatFs 层(diskio.c)与热插拔路径与数据通路互斥。
  * 语义与内部 sdcard_lock 相同, 但允许外部模块调用, 避免 SD_Init 在锁外
- * 重建 xSDcardMutex 与正在传输的任务互相踩踏。 */
-void sdcard_lock_external(void)
+ * 重建 xSDcardMutex 与正在传输的任务互相踩踏。
+ *
+ * 返回值约定: lock 返回 1 表示真的拿到了锁, 0 表示 mutex 尚未创建(首次
+ * 上电时 SD_Init 才会创建)。unlock 必须拿同一个返回值决定是否 Give ——
+ * 两边各自独立判断 NULL 的话, "lock 时还没 mutex、unlock 时已经有了"
+ * 会 Give 一个本任务不持有的互斥量, 凭空放行第三个任务。 */
+uint8_t sdcard_lock_external(void)
 {
-	if (xSDcardMutex != NULL) sdcard_lock();
+	if (xSDcardMutex != NULL) { sdcard_lock(); return 1; }
+	return 0;
 }
 
-void sdcard_unlock_external(void)
+void sdcard_unlock_external(uint8_t locked)
 {
-	if (xSDcardMutex != NULL) sdcard_unlock();
+	if (locked) sdcard_unlock();
 }
  
 //SDIO寄存器复位
@@ -583,11 +589,19 @@ static SD_Error SDIO_DMA_Wait_Complete(void)
     BaseType_t result;
 
     result = xSemaphoreTake(xSDcardSemaphore, pdMS_TO_TICKS(200));
-    if(result != pdTRUE) return SD_DATA_TIMEOUT;
+    if(result != pdTRUE) goto drain;
     result = xSemaphoreTake(xSDcardSemaphore, pdMS_TO_TICKS(200));
-    if(result != pdTRUE) return SD_DATA_TIMEOUT;
-	
+    if(result != pdTRUE) goto drain;
+
 	return SD_OK;
+
+drain:
+    /* 超时路径必须清掉迟到的计数: DMA TC/DATAEND 中断稍后仍会 Give,
+     * 残留的计数会让下一次传输的第一次 Take 立即成功 —— 数据还没传完
+     * 就被判定完成(与 w25q128.c 的同型函数保持一致的清理动作)。 */
+    while (xSDcardSemaphore != NULL &&
+           xSemaphoreTake(xSDcardSemaphore, 0) == pdTRUE) { }
+    return SD_DATA_TIMEOUT;
 }
 
 // 复位SDIO数据通道状态机(DPSM), 使 DPSM 回到空闲状态 (DataBlockSize=0 即1字节, 仅作清除, 不发起传输)
@@ -683,7 +697,11 @@ SD_Error SD_ReadBlock(uint8_t *buf,long long addr,uint16_t blksize)
 	SDIO->MASK|=SDIO_DATA_IRQ_MASK_RX;	//配置需要的中断 
 	SDIO->DCTRL|=1<<3;		 	//SDIO DMA使能 
 	SD_DMA_Config((uint32_t*)buf,blksize,DMA_DIR_PeripheralToMemory); 
-	SDIO_DMA_Wait_Complete();
+	/* DMA 等待的返回值不能丢: 超时(如 DATAEND 迟滞)时若仍返回 SD_OK,
+	 * FatFs 会把未完整接收的缓冲当有效数据, 文件内容静默损坏。
+	 * 多块读版本(:748)一直是带检查的, 这里与它保持一致。 */
+	errorstatus = SDIO_DMA_Wait_Complete();
+	if(errorstatus != SD_OK) return errorstatus;
 	if(TransferError!=SD_OK)errorstatus=TransferError;  
 
   	return errorstatus; 
@@ -835,6 +853,7 @@ SD_Error SD_WriteBlock(uint8_t *buf,long long addr,  uint16_t blksize)
 	SD_DMA_Config((uint32_t*)buf,blksize,DMA_DIR_MemoryToPeripheral);				//SDIO DMA配置
 	SDIO->DCTRL|=1<<3;								//SDIO DMA使能.  
 	errorstatus = SDIO_DMA_Wait_Complete();
+	if(errorstatus != SD_OK) return errorstatus;   // 超时时数据未发完, 不能走"成功"路径
 	if(TransferError!=SD_OK) return TransferError;  
   	return SD_Wait_Programming();//等待卡完成写编程(清标志+轮询),返回最终状态
 }
@@ -922,6 +941,7 @@ SD_Error SD_WriteMultiBlocks(uint8_t *buf,long long addr,uint16_t blksize,uint32
 		SD_DMA_Config((uint32_t*)buf,nblks*blksize,DMA_DIR_MemoryToPeripheral);		//SDIO DMA配置
 		SDIO->DCTRL|=1<<3;								//SDIO DMA使能. 
 		errorstatus = SDIO_DMA_Wait_Complete();	 
+		if(errorstatus != SD_OK) return errorstatus;   // 超时时数据未发完, 不能走"成功"路径
 		if(TransferError!=SD_OK)return TransferError;	 
   	}
   	return SD_Wait_Programming();//等待卡完成写编程(清标志+轮询),返回最终状态

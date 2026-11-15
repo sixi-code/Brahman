@@ -356,7 +356,8 @@ uint8_t SD_ReadDisk(uint8_t*buf,uint32_t sector,uint8_t cnt); 	//读sd卡,fatfs/
 uint8_t SD_WriteDisk(uint8_t*buf,uint32_t sector,uint8_t cnt);	//写SD卡,fatfs/usb调用
 
 // SD 卡互斥锁(供 FatFs 层在重试/重新初始化前后使用, 与数据通路互斥)
-void sdcard_lock_external(void);
-void sdcard_unlock_external(void);
+/* 返回 1=已拿锁, 0=mutex 未创建(无需解锁); unlock 必须传同一个返回值 */
+uint8_t sdcard_lock_external(void);
+void sdcard_unlock_external(uint8_t locked);
 
 #endif

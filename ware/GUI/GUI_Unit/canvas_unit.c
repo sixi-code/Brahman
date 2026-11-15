@@ -31,6 +31,7 @@ static uint8_t  pen_v = 0;   // 0-100 (默认0即黑色)
 static lv_obj_t * canvas_cont = NULL;   // 画布容器
 static lv_obj_t * pixel_canvas = NULL;  // 像素画布  
 static lv_color_t * canvas_buf = NULL;  // 画布缓冲区
+static uint8_t * bmp_row_buf = NULL;    // BMP 保存用的行缓冲(页面创建时分配, 复用)
 
 static lv_obj_t * float_panel = NULL;   // 浮动栏
 
@@ -323,11 +324,16 @@ static uint8_t Save_Canvas_To_BMP(const char * path)
 		result = CANVAS_FILE_FAIL;
 	}
 
-	uint8_t * row_buf = (uint8_t *)malloc_bsc(row_size);
-	if (row_buf == NULL) {
+	/* 行缓冲用页面生命周期的一次性分配, 不在保存路径上 malloc:
+	 * 回调里走 BSC 分配在池碎片化时容易失败, 且把失败处理混进写盘流程。 */
+	if (bmp_row_buf == NULL) {
+		bmp_row_buf = (uint8_t *)malloc_bsc(row_size);
+	}
+	if (bmp_row_buf == NULL) {
 		f_close(&file);
 		return CANVAS_FILE_FAIL;
 	}
+	uint8_t * row_buf = bmp_row_buf;
 
 	for (int y = 0; y < CANVAS_HEIGHT && result == CANVAS_FILE_OK; y++) {
 		memset(row_buf, 0, row_size);
@@ -340,7 +346,7 @@ static uint8_t Save_Canvas_To_BMP(const char * path)
 		if (f_write(&file, row_buf, row_size, &bw) != FR_OK || bw != row_size) result = CANVAS_FILE_FAIL;
 	}
 
-	free_bsc(row_buf);
+	// 行缓冲是页面级复用的, 不在这里释放
 
 	// 关闭时的落盘失败也要报出来, 否则文件可能是残缺的
 	if (f_close(&file) != FR_OK) result = CANVAS_FILE_FAIL;
@@ -372,11 +378,15 @@ static uint8_t Load_Canvas_From_BMP(const char * path)
 	f_lseek(&file, bfh.bfOffBits);
 
 	int row_size = ((CANVAS_WIDTH * 3) + 3) & ~3;
-	uint8_t * row_buf = (uint8_t *)malloc_bsc(row_size);
-	if (row_buf == NULL) {
+	/* 复用同一块页面级行缓冲(保存与加载共用, 不并发) */
+	if (bmp_row_buf == NULL) {
+		bmp_row_buf = (uint8_t *)malloc_bsc(row_size);
+	}
+	if (bmp_row_buf == NULL) {
 		f_close(&file);
 		return CANVAS_FILE_FAIL;
 	}
+	uint8_t * row_buf = bmp_row_buf;
 
 	bool top_down = (bih.biHeight < 0);
 
@@ -400,7 +410,6 @@ static uint8_t Load_Canvas_From_BMP(const char * path)
 		}
 	}
 
-	free_bsc(row_buf);
 	f_close(&file);
 
 	lv_obj_invalidate(pixel_canvas); // 标记需要重新绘制
@@ -1226,6 +1235,11 @@ void Remove_Canvas_Unit(void)
     if (canvas_buf) {
         free_bsc(canvas_buf);
         canvas_buf = NULL;
+    }
+
+    if (bmp_row_buf) {
+        free_bsc(bmp_row_buf);
+        bmp_row_buf = NULL;
     }
 
     clear_history();

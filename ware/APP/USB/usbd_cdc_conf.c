@@ -137,17 +137,24 @@ static signed short usb_shell_write(char *data, unsigned short len)
 // 返回值: 无
 static void usbd_event_handler(uint8_t busid, uint8_t event)
 {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     switch (event) {
         case USBD_EVENT_CONFIGURED:
             is_configured = true;
-            xSemaphoreTake(usb_tx_cplt_sem, 0);
+            /* 本回调由 USB 中断调用: 必须用 FromISR 版本, 任务版 API 在中断
+               上下文里会破坏调度器内部状态(信号量计数错乱/静默腐蚀)。 */
+            if (usb_tx_cplt_sem != NULL) {
+                xSemaphoreTakeFromISR(usb_tx_cplt_sem, &xHigherPriorityTaskWoken);
+            }
             if (read_buffer != NULL) {
                 usbd_ep_start_read(busid, CDC_OUT_EP, read_buffer, CDC_MAX_MPS);
             }
             break;
         case USBD_EVENT_DISCONNECTED:
             is_configured = false;
-            xSemaphoreGive(usb_tx_cplt_sem);
+            if (usb_tx_cplt_sem != NULL) {
+                xSemaphoreGiveFromISR(usb_tx_cplt_sem, &xHigherPriorityTaskWoken);
+            }
             break;
         default:
             break;

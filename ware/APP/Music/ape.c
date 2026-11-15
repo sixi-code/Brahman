@@ -36,14 +36,11 @@ extern filter_int *filterbuf64;		// apedecoder.c 内的长滤波器缓冲(需 28
 // 填充PCM数据到DAC(APE 固定走 16bit 路径,直接整块搬进 DMA 缓冲)
 // buf: 解码得到的 PCM 数据首地址
 // size: pcm数据量(16位为单位)
-void ape_fill_buffer(uint16_t* buf, uint16_t size)
+// dst: 目标 DMA 缓冲(调用方在拿到信号量后立即快照, 不能在这里再读 I2SdmaBuff ——
+//      解码耗时的几毫秒里 DMA 半满/全满中断可能翻转它, 两次读取会选中不同缓冲)
+void ape_fill_buffer(uint16_t* buf, uint16_t size, uint16_t* dst)
 {
-    // 选择本次要填充的 DMA 缓冲区(ping/pong 交替)
-    uint16_t *p = (I2SdmaBuff == 0) ? 
-                 (uint16_t*)music_ctrl.i2sbuf1: 
-                 (uint16_t*)music_ctrl.i2sbuf2;
-
-    memcpy(p, buf, size * sizeof(uint16_t));// 解码结果与 I2S 要求同构,直接整块拷贝
+    memcpy(dst, buf, size * sizeof(uint16_t));// 解码结果与 I2S 要求同构,直接整块拷贝
 }
 
 // 原地定点音量处理(逐样本乘 kv_spk_value 再 >>8,不改变采样点数)
@@ -160,8 +157,12 @@ uint8_t ape_play_song_prepare(uint8_t* fname)
 				// 总样本数 = 末帧块数 + 每帧块数 * (总帧数 - 1)
 				if(apex->totalframes>1)totalsamples=apex->finalframeblocks+apex->blocksperframe*(apex->totalframes-1);
 				else totalsamples=apex->finalframeblocks;// 只有一帧:直接用末帧块数
+				/* 截断的 APE(totalframes<=1 且 finalframeblocks==0)会让 totsec=0,
+				   下面两处除法在 M4 上是 UsageFault。本函数不在循环里,
+				   用嵌套 if 跳过剩余解析(等价于"提前退出")。 */
+				if(apectrl->samplerate != 0 && totalsamples != 0) {
 				apectrl->totsec=totalsamples/apectrl->samplerate;// 总秒数
-				apectrl->bitrate=(f_size(music_ctrl.file)-apex->firstframe)*8/apectrl->totsec;// 平均码率 = 音频数据字节数 * 8 / 总秒数
+				apectrl->bitrate=(apectrl->totsec > 0) ? (f_size(music_ctrl.file)-apex->firstframe)*8/apectrl->totsec : 0;
 				apectrl->outsamples=APE_BLOCKS_PER_LOOP*2;// 单轮输出的样本数
 				apectrl->datastart=apex->firstframe;// 音频数据起始位置
                 
@@ -190,6 +191,9 @@ uint8_t ape_play_song_prepare(uint8_t* fname)
                 music_info.samplerate = apectrl->samplerate;// 采样率
                 music_info.bit_depth = apectrl->bps;// 位深
                 music_info.current_sec = 0;// 当前秒数清零
+				} else {
+					res = 1;   // 采样率或总样本数为 0: 畸形文件, 交给 Song_End
+				}
 			}
 		}
 	}
@@ -318,7 +322,7 @@ void ape_play_song_task(uint8_t* fname)
 				}
 
 				// 只拷贝有效数据并原位处理音量，末尾清零
-				ape_fill_buffer((uint16_t*)decoded1, blockstodecode * 2);// 把解码结果搬进 DMA 缓冲
+				ape_fill_buffer((uint16_t*)decoded1, blockstodecode * 2, target_buf);// 把解码结果搬进 DMA 缓冲(用快照目标)
 				// 不足一整块:尾部补 0,避免残留上一轮数据
 				if(blockstodecode < APE_BLOCKS_PER_LOOP)
 				{

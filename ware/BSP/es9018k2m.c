@@ -2,6 +2,7 @@
 //配置值时，先将配置值写入s_es9018_config_new结构体中，
 //然后调用ES9018_Update_Register()函数将新的配置写入芯片寄存器
 #include "stm32f4xx.h"                  
+#include <string.h>   // memcmp: 判断本轮快照期间是否又有新配置写入
 #include "es9018k2m.h"                  
 #include "FreeRTOS.h"
 #include "task.h"
@@ -496,8 +497,13 @@ void ES9018_Get_Config(ES9018_Config_t *config)
 void ES9018_Set_Config(const ES9018_Config_t *config) 
 {
     if (config) {
+        /* 结构体赋值非原子, 而 Update_Register(时钟任务周期调用)可能正逐字段
+         * 比对/回写同一块内存 —— 读方会拿到新旧字段混合的配置写进芯片。
+         * 18 字节的拷贝在临界区内完成, 代价可忽略。 */
+        taskENTER_CRITICAL();
         s_es9018_config_new = *config;
         s_settings_changed = 1;
+        taskEXIT_CRITICAL();
     }
 }
 
@@ -609,106 +615,121 @@ uint8_t ES9018_Update_Register(void)
     if(!g_es9018_inited) return ES9018_ERR_NOT_WORKING;
 
     uint8_t res;
+    ES9018_Config_t snapshot;
     
     if(!s_settings_changed) return ES9018_OK;
     
+    /* 取快照后再逐条写寄存器: 写寄存器期间(毫秒级, 涉及 I2C) Set_Config 可能
+     * 又改了 config_new, 若直接对着 config_new 比对/回写, old 会被写进
+     * "新旧混合"的值, 某字段从此不再被更新。 */
+    taskENTER_CRITICAL();
+    snapshot = s_es9018_config_new;
+    taskEXIT_CRITICAL();
+    
     // 1. 自动静音时间
-    if(s_es9018_config_old.Automute_Time != s_es9018_config_new.Automute_Time) {
-        res = ES9018_Reg4_Set_AutoMute_Time(s_es9018_config_new.Automute_Time);
+    if(s_es9018_config_old.Automute_Time != snapshot.Automute_Time) {
+        res = ES9018_Reg4_Set_AutoMute_Time(snapshot.Automute_Time);
         if(res) { return res; }
-        s_es9018_config_old.Automute_Time = s_es9018_config_new.Automute_Time;
+        s_es9018_config_old.Automute_Time = snapshot.Automute_Time;
     }
     
     // 2. 自动静音电平 + 环回
-    if(s_es9018_config_old.Enable_Loopback != s_es9018_config_new.Enable_Loopback || 
-       s_es9018_config_old.Automute_Level != s_es9018_config_new.Automute_Level) {
-        res = ES9018_Reg5_Set_AutoMute_Level(s_es9018_config_new.Enable_Loopback, s_es9018_config_new.Automute_Level);
+    if(s_es9018_config_old.Enable_Loopback != snapshot.Enable_Loopback || 
+       s_es9018_config_old.Automute_Level != snapshot.Automute_Level) {
+        res = ES9018_Reg5_Set_AutoMute_Level(snapshot.Enable_Loopback, snapshot.Automute_Level);
         if(res) { return res; }
-        s_es9018_config_old.Enable_Loopback = s_es9018_config_new.Enable_Loopback;
-        s_es9018_config_old.Automute_Level = s_es9018_config_new.Automute_Level;
+        s_es9018_config_old.Enable_Loopback = snapshot.Enable_Loopback;
+        s_es9018_config_old.Automute_Level = snapshot.Automute_Level;
     }
     
     // 3. 去加重 / 音量变化速率
-    if(s_es9018_config_old.Vol_Rate != s_es9018_config_new.Vol_Rate) {
-        res = ES9018_Reg6_DeEmphasis(s_es9018_config_new.Vol_Rate);
+    if(s_es9018_config_old.Vol_Rate != snapshot.Vol_Rate) {
+        res = ES9018_Reg6_DeEmphasis(snapshot.Vol_Rate);
         if(res) { return res; }
-        s_es9018_config_old.Vol_Rate = s_es9018_config_new.Vol_Rate;
+        s_es9018_config_old.Vol_Rate = snapshot.Vol_Rate;
     }
     
     // 4. 通用设置：滤波器 + IIR带宽 + 静音
-    if(s_es9018_config_old.Filter_Shape != s_es9018_config_new.Filter_Shape ||
-       s_es9018_config_old.IIR_BW != s_es9018_config_new.IIR_BW ||
-       s_es9018_config_old.Mute_Ch1 != s_es9018_config_new.Mute_Ch1 ||
-       s_es9018_config_old.Mute_Ch2 != s_es9018_config_new.Mute_Ch2) {
-        res = ES9018_Reg7_General_Set(s_es9018_config_new.Filter_Shape, s_es9018_config_new.IIR_BW, s_es9018_config_new.Mute_Ch1, s_es9018_config_new.Mute_Ch2);
+    if(s_es9018_config_old.Filter_Shape != snapshot.Filter_Shape ||
+       s_es9018_config_old.IIR_BW != snapshot.IIR_BW ||
+       s_es9018_config_old.Mute_Ch1 != snapshot.Mute_Ch1 ||
+       s_es9018_config_old.Mute_Ch2 != snapshot.Mute_Ch2) {
+        res = ES9018_Reg7_General_Set(snapshot.Filter_Shape, snapshot.IIR_BW, snapshot.Mute_Ch1, snapshot.Mute_Ch2);
         if(res) { return res; }
-        s_es9018_config_old.Filter_Shape = s_es9018_config_new.Filter_Shape;
-        s_es9018_config_old.IIR_BW = s_es9018_config_new.IIR_BW;
-        s_es9018_config_old.Mute_Ch1 = s_es9018_config_new.Mute_Ch1;
-        s_es9018_config_old.Mute_Ch2 = s_es9018_config_new.Mute_Ch2;
+        s_es9018_config_old.Filter_Shape = snapshot.Filter_Shape;
+        s_es9018_config_old.IIR_BW = snapshot.IIR_BW;
+        s_es9018_config_old.Mute_Ch1 = snapshot.Mute_Ch1;
+        s_es9018_config_old.Mute_Ch2 = snapshot.Mute_Ch2;
     }
     
     // 5. 主模式 / 锁定边沿数
-    if(s_es9018_config_old.Stop_Div != s_es9018_config_new.Stop_Div) {
-        res = ES9018_Reg10_Master_Mode_Control(s_es9018_config_new.Stop_Div);
+    if(s_es9018_config_old.Stop_Div != snapshot.Stop_Div) {
+        res = ES9018_Reg10_Master_Mode_Control(snapshot.Stop_Div);
         if(res) { return res; }
-        s_es9018_config_old.Stop_Div = s_es9018_config_new.Stop_Div;
+        s_es9018_config_old.Stop_Div = snapshot.Stop_Div;
     }
     
     // 6. 通道映射
-    if(s_es9018_config_old.Sel_Ch1 != s_es9018_config_new.Sel_Ch1 || 
-       s_es9018_config_old.Sel_Ch2 != s_es9018_config_new.Sel_Ch2) {
-        res = ES9018_Reg11_Channel_Mapping(s_es9018_config_new.Sel_Ch1, s_es9018_config_new.Sel_Ch2);
+    if(s_es9018_config_old.Sel_Ch1 != snapshot.Sel_Ch1 || 
+       s_es9018_config_old.Sel_Ch2 != snapshot.Sel_Ch2) {
+        res = ES9018_Reg11_Channel_Mapping(snapshot.Sel_Ch1, snapshot.Sel_Ch2);
         if(res) { return res; }
-        s_es9018_config_old.Sel_Ch1 = s_es9018_config_new.Sel_Ch1;
-        s_es9018_config_old.Sel_Ch2 = s_es9018_config_new.Sel_Ch2;
+        s_es9018_config_old.Sel_Ch1 = snapshot.Sel_Ch1;
+        s_es9018_config_old.Sel_Ch2 = snapshot.Sel_Ch2;
     }
     
     // 7. DPLL 带宽
-    if(s_es9018_config_old.DPLL_BW != s_es9018_config_new.DPLL_BW) {
-        res = ES9018_Reg12_DPLL_Setting(s_es9018_config_new.DPLL_BW);
+    if(s_es9018_config_old.DPLL_BW != snapshot.DPLL_BW) {
+        res = ES9018_Reg12_DPLL_Setting(snapshot.DPLL_BW);
         if(res) { return res; }
-        s_es9018_config_old.DPLL_BW = s_es9018_config_new.DPLL_BW;
+        s_es9018_config_old.DPLL_BW = snapshot.DPLL_BW;
     }
     
     // 8. THD 补偿旁路
-    if(s_es9018_config_old.Bypass_THD != s_es9018_config_new.Bypass_THD) {
-        res = ES9018_Reg13_THD_Compensation(s_es9018_config_new.Bypass_THD);
+    if(s_es9018_config_old.Bypass_THD != snapshot.Bypass_THD) {
+        res = ES9018_Reg13_THD_Compensation(snapshot.Bypass_THD);
         if(res) { return res; }
-        s_es9018_config_old.Bypass_THD = s_es9018_config_new.Bypass_THD;
+        s_es9018_config_old.Bypass_THD = snapshot.Bypass_THD;
     }
     
     // 9. 软启动 / 失锁处理
-    if(s_es9018_config_old.Mute_Lock != s_es9018_config_new.Mute_Lock || 
-       s_es9018_config_old.OutL_Lock != s_es9018_config_new.OutL_Lock) {
-        res = ES9018_Reg14_Soft_Start_Setting(s_es9018_config_new.Mute_Lock, s_es9018_config_new.OutL_Lock);
+    if(s_es9018_config_old.Mute_Lock != snapshot.Mute_Lock || 
+       s_es9018_config_old.OutL_Lock != snapshot.OutL_Lock) {
+        res = ES9018_Reg14_Soft_Start_Setting(snapshot.Mute_Lock, snapshot.OutL_Lock);
         if(res) { return res; }
-        s_es9018_config_old.Mute_Lock = s_es9018_config_new.Mute_Lock;
-        s_es9018_config_old.OutL_Lock = s_es9018_config_new.OutL_Lock;
+        s_es9018_config_old.Mute_Lock = snapshot.Mute_Lock;
+        s_es9018_config_old.OutL_Lock = snapshot.OutL_Lock;
     }
     
     // 10. IIR 旁路
-    if(s_es9018_config_old.Bypass_IIR != s_es9018_config_new.Bypass_IIR) {
-        res = ES9018_Reg21_Bypass_OSF_IIR(s_es9018_config_new.Bypass_IIR);
+    if(s_es9018_config_old.Bypass_IIR != snapshot.Bypass_IIR) {
+        res = ES9018_Reg21_Bypass_OSF_IIR(snapshot.Bypass_IIR);
         if(res) { return res; }
-        s_es9018_config_old.Bypass_IIR = s_es9018_config_new.Bypass_IIR;
+        s_es9018_config_old.Bypass_IIR = snapshot.Bypass_IIR;
     }
     
     // 11. 二次谐波补偿系数
-    if(s_es9018_config_old.C2 != s_es9018_config_new.C2) {
-        res = ES9018_Reg22_23_THD_Comp_C2(s_es9018_config_new.C2);
+    if(s_es9018_config_old.C2 != snapshot.C2) {
+        res = ES9018_Reg22_23_THD_Comp_C2(snapshot.C2);
         if(res) { return res; }
-        s_es9018_config_old.C2 = s_es9018_config_new.C2;
+        s_es9018_config_old.C2 = snapshot.C2;
     }
     
     // 12. 三次谐波补偿系数
-    if(s_es9018_config_old.C3 != s_es9018_config_new.C3) {
-        res = ES9018_Reg24_25_THD_Comp_C3(s_es9018_config_new.C3);
+    if(s_es9018_config_old.C3 != snapshot.C3) {
+        res = ES9018_Reg24_25_THD_Comp_C3(snapshot.C3);
         if(res) { return res; }
-        s_es9018_config_old.C3 = s_es9018_config_new.C3;
+        s_es9018_config_old.C3 = snapshot.C3;
     }
     
-    s_settings_changed = 0;
+        /* 只有"本轮快照之后没有再进来新配置"才能清标志:
+       Set_Config 在我们写寄存器期间又改了 config_new 时, changed 保留,
+       下一轮把新值继续下发。 */
+    taskENTER_CRITICAL();
+    if (memcmp(&snapshot, &s_es9018_config_new, sizeof(ES9018_Config_t)) == 0) {
+        s_settings_changed = 0;
+    }
+    taskEXIT_CRITICAL();
     return ES9018_OK;
 }
 

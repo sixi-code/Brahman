@@ -27,8 +27,15 @@ void tsdb_printf(const char *format, ...)
     if (!tsdb.parent.init_ok) return;// 如果时间戳数据库未初始化，则直接返回
     if (__get_IPSR() != 0) return;// 如果当前处于中断上下文，则直接返回，避免在中断中进行复杂的操作
 
+    /* check-then-malloc 必须原子: 两个任务并发首次打印时都看到 NULL,
+     * 各自 malloc 后后写者覆盖前者指针, 泄漏 20x256B(BSC 池, 长期可耗尽)。
+     * malloc_bsc 自带锁, 临界区只包"判断+赋值"。 */
     if (tsdb_queue == NULL) {
-        tsdb_queue = (tsdb_queue_entry_t *)malloc_bsc(sizeof(tsdb_queue_entry_t) * TSDB_QUEUE_SIZE);// 分配环形缓冲区内存
+        taskENTER_CRITICAL();
+        if (tsdb_queue == NULL) {
+            tsdb_queue = (tsdb_queue_entry_t *)malloc_bsc(sizeof(tsdb_queue_entry_t) * TSDB_QUEUE_SIZE);
+        }
+        taskEXIT_CRITICAL();
         if (tsdb_queue == NULL) return;
     }
 

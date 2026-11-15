@@ -23,7 +23,7 @@ typedef __packed struct
 
 extern __apectrl * apectrl; 
 
-void ape_fill_buffer(uint16_t* buf,uint16_t size);
+void ape_fill_buffer(uint16_t* buf,uint16_t size,uint16_t* dst);   // dst: 目标 DMA 缓冲(调用方快照,勿在函数内重读 I2SdmaBuff)
 void ape_i2s_dma_tx_callback(void);
 void ape_get_curtime(FIL*fx,__apectrl *apectrl);
 void ape_file_seek(uint32_t target_sec);

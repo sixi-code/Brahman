@@ -218,11 +218,22 @@ void LCD_Init(void)
 // 纯粹的底层 DMA 发送函数（不设地址）data: 16位像素数据起始地址，pixel_count: 像素数量
 void LCD_Write_DMA(uint16_t *data, uint32_t pixel_count)
 {
+    /* 上一笔传输还在跑时(EN=1)再来一发, M0AR/NDTR 会被后写者覆盖,
+     * DMA 从新旧混合的配置取数 → 错帧/向错误缓冲取数。
+     * 正常路径下 DMA 完成中断早已清 EN; 这里防的是切换窗口期的并发。 */
+    uint32_t guard = 0;
+    while ((DMA2_Stream5->NDTR != 0) && ((DMA2_Stream5->CR & DMA_SxCR_EN) != 0)) {
+        if (++guard > 200000) break;   // 约 1ms@168MHz: 异常时不无限等, 放弃本次
+        __NOP();
+    }
+
+    taskENTER_CRITICAL();
     lcd_dma_user = g_lcd_user; //获取本次传输的真正发起者
     DMA2_Stream5->M0AR = (uint32_t)data;// 设置 DMA 内存地址为数据起始地址
     DMA2_Stream5->NDTR = pixel_count;// 设置 DMA 数据传输数量
     SPI_I2S_DMACmd(SPI1, SPI_I2S_DMAReq_Tx, ENABLE);
     DMA_Cmd(DMA2_Stream5, ENABLE);
+    taskEXIT_CRITICAL();
 }
 
 // 供 LVGL 使用的颜色填充 xsta: 起始 X 坐标, ysta: 起始 Y 坐标, xend: 结束 X 坐标, yend: 结束 Y 坐标, color: 颜色数据数组

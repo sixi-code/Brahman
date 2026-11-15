@@ -175,9 +175,17 @@ void Create_Log_Control(void)
 	update_all_buttons_state();
 }
 
+static uint8_t g_dump_usb_req = 0;   // Dump 请求: 回调登记, Update 里执行
+
 void Update_Log_Control(void)
 {
 	if (ls == NULL) return;
+
+	/* 消费 Dump 请求: 长耗时导出放在 update 阶段, 事件回调不再冻结界面 */
+	if (g_dump_usb_req) {
+		g_dump_usb_req = 0;
+		Debug_Dump_TSDB_To_USB(30);
+	}
 
 	update_all_buttons_state();
 
@@ -308,7 +316,9 @@ static void dump_usb_event_cb(lv_event_t * e)
 		ls->dump_state = 1;
 		if (label) lv_label_set_text(label, "Dump USB");
 	} else {
-		Debug_Dump_TSDB_To_USB(30);
+		/* Debug_Dump_TSDB_To_USB 每行走 usb_printf(mutex 100ms 超时)+vTaskDelay(5ms),
+		 * 30 行最坏可阻塞数秒 —— 只登记, 由 Update_Log_Control() 执行。 */
+		g_dump_usb_req = 1;
 		g_usb_function = USB_NONE;
 		ls->dump_state = 0;
 		if (label) lv_label_set_text(label, "Open USB");

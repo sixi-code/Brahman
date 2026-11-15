@@ -145,7 +145,9 @@ const struct usb_descriptor audio_v1_descriptor = {
 USB_MEM_ALIGNX uint8_t s_speakerv1_feedback_buffer[4]; // 反馈端点缓冲区
 
 volatile static bool rx_flag = 0; // 1: 主机已打开音频流，0: 主机未打开音频流
-volatile static uint32_t s_speaker_sample_rate; // 采样率，单位Hz，默认值为AUDIO_OUT_MAX_FREQ
+/* 必须给默认值: 主机未先发 SET_FREQ 时 open 就用本值填反馈端点,
+ * 0 会让主机收到非法反馈包(流失速/静音)。uac2 一直有默认值, 这里对齐。 */
+volatile static uint32_t s_speaker_sample_rate = AUDIO_SPEAKER_FREQ;
 
 static void usbd_event_handler(uint8_t busid, uint8_t event)
 {
@@ -354,9 +356,15 @@ void usbd_audiov1_open(uint8_t busid, uint8_t intf)
 
 void usbd_audiov1_close(uint8_t busid, uint8_t intf)
 {
-    rx_flag = 0;
+	/* 释放顺序: 先关端点(掐断新的 OUT 完成中断) → 清 rx_flag →
+	 * 再等一拍让"已进入 ISR 但还没跑完"的回调退出 → 最后 free。
+	 * 先 free 后关端点的话, 在途回调会 memcpy 进已释放的缓冲。 */
+	usbd_ep_close(busid, AUDIO_OUT_EP);
+	usbd_ep_close(busid, AUDIO_OUT_FEEDBACK_EP);
+	rx_flag = 0;
 	I2S_Play_Stop();
-    dma_started = false; // 复位DMA状态
+	vTaskDelay(pdMS_TO_TICKS(2));   // 让在途的 OUT 完成回调走完
+	dma_started = false;
     
 	if(uac1_audio_ring_buf) { free_bsc(uac1_audio_ring_buf); uac1_audio_ring_buf = NULL; }
 	if(uac1_dma_buf0) { free_bsc(uac1_dma_buf0); uac1_dma_buf0 = NULL; }
@@ -368,17 +376,19 @@ void usbd_audiov1_close(uint8_t busid, uint8_t intf)
 
 void usbd_uac1_deinit(void)
 {
+	/* 与 audiov1_close 同理: 先关端点再释放, 防 in-flight 回调 UAF */
+	usbd_ep_close(0, AUDIO_OUT_EP);
+	usbd_ep_close(0, AUDIO_OUT_FEEDBACK_EP);
+	rx_flag = 0;
     I2S_Play_Stop();
+    vTaskDelay(pdMS_TO_TICKS(2));
     dma_started = false;
-    rx_flag = 0;
     
     if(uac1_audio_ring_buf) { free_bsc(uac1_audio_ring_buf); uac1_audio_ring_buf = NULL; }
     if(uac1_dma_buf0) { free_bsc(uac1_dma_buf0); uac1_dma_buf0 = NULL; }
     if(uac1_dma_buf1) { free_bsc(uac1_dma_buf1); uac1_dma_buf1 = NULL; }
     if(uac1_usb_buf)  { free_bsc(uac1_usb_buf); uac1_usb_buf = NULL; }
 	
-	usbd_ep_close(0, AUDIO_OUT_EP);
-    usbd_ep_close(0, AUDIO_OUT_FEEDBACK_EP);
 	usbd_deinitialize(0);
 }
 

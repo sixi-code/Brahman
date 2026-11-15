@@ -318,6 +318,7 @@ uint8_t video_avi_play_task(void) {
         if (++idle_rounds > 200000UL) return 2;   // 约数秒无有效帧, 判为坏文件
 
         uint32_t chunk[2]; UINT br;
+        uint32_t chunk_hdr_pos = f_tell(&fil);   // 8 字节头之前的位置(兜底检查的基准)
         if (f_read(&fil, chunk, 8, &br) != FR_OK || br != 8) {
             if (movi_offset != 0) {
                 f_lseek(&fil, movi_offset);
@@ -445,10 +446,11 @@ uint8_t video_avi_play_task(void) {
             f_lseek(&fil, chunk_start_pos + align_size);
         }
 
-        /* 兜底前进性检查: csize==0 时 align_size 也是 0, 各分支的
-         * f_lseek(chunk_start_pos + 0) 会让文件指针原地不动 ——
-         * 表现为"画面卡在第 N 帧、按键无响应"。强制至少跳过 8 字节。 */
-        if (f_tell(&fil) <= chunk_start_pos) f_lseek(&fil, chunk_start_pos + 8);
+        /* 兜底前进性检查: 基准必须是"头之前"的位置。
+         * csize==0 的合法空 chunk(JUNK/空帧)走 f_lseek(chunk_start_pos+0)
+         * 后 f_tell 恰好等于 chunk_start_pos —— 若拿它当基准, "原地"会被
+         * 误判成卡死而强跳 8 字节, 把下一个 chunk 的头吃掉, 流就此错位。 */
+        if (f_tell(&fil) <= chunk_hdr_pos) f_lseek(&fil, chunk_hdr_pos + 8);
     }
 }
 

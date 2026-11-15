@@ -117,7 +117,13 @@ void usb_display_init(uint8_t busid, uintptr_t reg_base)
 {
 	g_lcd_user = LCD_USER_DISP;
 	Taskmanager_Ctrl(Task_N_LVGL, Task_T_Suspend, 0);
-	Taskmanager_Wait_Suspended(Task_N_LVGL, 500);// 等 LVGL 真挂起再动显存, 见 media_task.c
+	/* 必须确认 LVGL 真挂起了才动显存: 超时说明它还在跑 disp_flush/DMA,
+	   此时 deinit 会回收在用的 draw_buf —— 在途传输读已释放内存。
+	   超时就整体回退, 副屏开启失败比花屏/HardFault 好得多。 */
+	if (Taskmanager_Wait_Suspended(Task_N_LVGL, 500) != 0) {
+		g_lcd_user = LCD_USER_LVGL;
+		return;
+	}
 	Page_Push_History(Page_Get_Current());
 	lv_port_disp_deinit();
 	Page_Request_Switch(PAGE_DISPLAY);

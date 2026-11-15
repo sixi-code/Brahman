@@ -23,7 +23,7 @@ static void disp_flush(lv_disp_drv_t * disp_drv, const lv_area_t * area, lv_colo
 
 /* 当前正在等待 lv_disp_flush_ready() 的驱动描述符; NULL 表示没有在飞搬运。
  * 原定义在文件中部, 因为 lv_port_disp_wait_idle() 要用, 提前到这里。 */
-static lv_disp_drv_t *current_disp_drv = NULL;
+static lv_disp_drv_t * volatile current_disp_drv = NULL;   // 任务写/ISR 清零, 必须 volatile
 
 /* 等待"当前没有正在进行的显存搬运"。
  * LCD_Color_Fill() 是 DMA 搬运, disp_flush 返回时像素还在从 buf_2_x 里往外搬;

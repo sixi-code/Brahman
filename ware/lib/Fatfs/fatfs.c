@@ -52,11 +52,15 @@ uint8_t fatfs_unmount(uint8_t pdrv)
     // 1. 卸载文件系统
     res = f_mount(NULL, path, 0);
 
-    // 2. 自动释放内存
-    if(fs[pdrv] != NULL)
+    /* 2. 不能 free FATFS 结构。
+     * FatFs 在 FF_FS_LOCK=0 时不跟踪打开的 FIL: 音乐播放中拔卡时, 另一任务
+     * 手里可能还攥着指向这个 FATFS 的 FIL -> fs 指针, free 之后它就成了
+     * 指向已释放堆块的野指针, 后续任何 f_read 都是堆损坏。
+     * 改为保留结构体复用: f_mount(NULL) 只是让卷失效, 下次 mount 时
+     * f_mount 会重新初始化这块内存, 复用是安全的, 且省一次分配/释放。 */
+    if(fs[pdrv] == NULL)
     {
-        free_bsc(fs[pdrv]);
-        fs[pdrv] = NULL; // 必须置空，防止下次 mount 时重复使用野指针
+        fs[pdrv] = (FATFS *)malloc_bsc(sizeof(FATFS));
     }
 
     return res;

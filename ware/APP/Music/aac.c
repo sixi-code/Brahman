@@ -297,6 +297,9 @@ uint8_t aac_play_song_prepare(uint8_t* fname)
 		I2S2_SampleRate_Set(aacctrl->Samplerate_Out);		// 设置采样率 
 		I2S2_TX_DMA_Init(music_ctrl.i2sbuf1,music_ctrl.i2sbuf2,aacctrl->outputSamps);// 配置TX DMA
 		aacdecoder=AACInitDecoder(); 					// aac解码申请内存
+		if(aacdecoder == NULL) {
+			res = 3;   // 初始化失败: 不判空的话 Song_Playing 阶段会对 NULL 解码
+		}
 		res = f_open(music_ctrl.file,(char*)fname,FA_READ);	// 打开文件
 
         // 填充 music_info 结构体

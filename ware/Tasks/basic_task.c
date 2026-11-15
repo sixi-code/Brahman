@@ -10,6 +10,7 @@
 #include "main.h"
 #include "lcd_pwm.h"
 #include "sdio_sdcard.h"
+#include "iwdg_feed.h"
 #include "tsdb_log.h"
 #include "kvdb_ctrl.h"
 
@@ -64,16 +65,29 @@ void Basic_Task( void * pvParameters )
 		//tf卡插入卸载
 		if(!g_TFcard_inited && g_TFcard_status)
 		{
-			if(!SD_Init()) fatfs_mount(DEV_SD);// TF卡初始化成功后挂载文件系统
-			else SD_Deinit();// TF卡初始化失败则立即卸载
+			/* 热插拔处理必须与在途传输互斥: MUSIC/FILEOP 可能正持有 sdcard_lock
+			   做 DMA 读写, 此时 SD_Init 会复位 SDIO 外设并重配 DMA 流, 直接竞踩。
+			   diskio.c 的重试路径用的就是这对接口。 */
+			uint8_t locked = sdcard_lock_external();
+			uint8_t ok = (!SD_Init());
+			if (ok) {
+				ok = (fatfs_mount(DEV_SD) == 0);   // 挂载失败(坏卡/BPB 读不出)不能当卡可用
+				if (!ok) SD_Deinit();
+			} else {
+				SD_Deinit();
+			}
+			sdcard_unlock_external(locked);
+			if (!ok) vTaskDelay(pdMS_TO_TICKS(500));   // 失败别在全速循环里连轴重试
 		}
 		if(g_TFcard_inited && !g_TFcard_status)// TF卡拔出则卸载文件系统
 		{
 			/* 顺序很重要: 先摘卷(此后不会再有新的 f_* 打开文件), 再关硬件。
 			   若先 SD_Deinit 后 fatfs_unmount, 窗口期内仍有任务在按 fs 指针读写,
 			   而 SD_Deinit 已经把外设关了 → 介质消失 + 野指针。 */
+			uint8_t locked = sdcard_lock_external();
 			fatfs_unmount(DEV_SD);
 			SD_Deinit();
+			sdcard_unlock_external(locked);
 		}
 
 		//pwm ctrl
@@ -150,8 +164,13 @@ void Basic_Task( void * pvParameters )
 		 * vTaskDelayUntil 也会因超时失去节拍意义。 */
 		if ((count_tick % 5) == 0)
 		{
+			/* 两次 flush 最坏会连续触发 FlashDB 的 GC/扇区合并, 多个扇区擦除
+			   累计可超过 IWDG 的 3.7s 周期 —— 复位发生在 KVDB 写入中途会损坏
+			   记录。flush 前喂一次狗, 把本周期的时间预算重新开始计。 */
+			IWDG_FEED_SAFE();
 			tsdb_log_flush();// 将日志缓冲区中的数据写入存储设备
 			kvdb_persist_flush();// 将所有已修改的持久化条目写入kvdb
+			IWDG_FEED_SAFE();
 		}
 
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(20));

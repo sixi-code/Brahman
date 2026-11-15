@@ -341,28 +341,34 @@ void usbd_audiov2_open(uint8_t busid, uint8_t intf)
 void usbd_audiov2_close(uint8_t busid, uint8_t intf)
 {
     USB_LOG_RAW("CLOSE\r\n");
+	/* 先关端点再释放: 防 in-flight OUT 回调 memcpy 进已释放缓冲(与 uac1 同理) */
+	usbd_ep_close(busid, AUDIO_OUT_EP);
+	usbd_ep_close(busid, AUDIO_OUT_FEEDBACK_EP);
+	rx_flag = 0;
 	I2S_Play_Stop();
+	vTaskDelay(pdMS_TO_TICKS(2));
     dma_started = false; 
 	if(uac2_audio_ring_buf) { free_bsc(uac2_audio_ring_buf); uac2_audio_ring_buf = NULL;}
 	if(uac2_dma_buf0) { free_bsc(uac2_dma_buf0); uac2_dma_buf0 = NULL;}
 	if(uac2_dma_buf1) { free_bsc(uac2_dma_buf1); uac2_dma_buf1 = NULL;}
 	if(uac2_usb_buf)  { free_bsc(uac2_usb_buf); uac2_usb_buf = NULL;}
-    rx_flag = 0;
 }
 
 void usbd_uac2_deinit(void)
 {
+	/* 与 audiov2_close 同理: 先关端点再释放, 防 in-flight 回调 UAF */
+	usbd_ep_close(0, AUDIO_OUT_EP);
+	usbd_ep_close(0, AUDIO_OUT_FEEDBACK_EP);
+	rx_flag = 0;
     I2S_Play_Stop();
+    vTaskDelay(pdMS_TO_TICKS(2));
     dma_started = false;
-    rx_flag = 0;
     
     if(uac2_audio_ring_buf) { free_bsc(uac2_audio_ring_buf); uac2_audio_ring_buf = NULL; }
     if(uac2_dma_buf0) { free_bsc(uac2_dma_buf0); uac2_dma_buf0 = NULL; }
     if(uac2_dma_buf1) { free_bsc(uac2_dma_buf1); uac2_dma_buf1 = NULL; }
     if(uac2_usb_buf)  { free_bsc(uac2_usb_buf); uac2_usb_buf = NULL; }
 	
-	usbd_ep_close(0, AUDIO_OUT_EP);
-    usbd_ep_close(0, AUDIO_OUT_FEEDBACK_EP);
 	usbd_deinitialize(0);
 }
 

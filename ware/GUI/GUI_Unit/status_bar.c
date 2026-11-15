@@ -278,7 +278,10 @@ void Remove_Status_Bar(void)
 
     if(status_bar != NULL) 
 	{
-        lv_obj_del_async(status_bar); 
+        /* 同步删除: 本函数只在 LVGL 任务上下文被调(Page_Manager_Loop 的 exit 段),
+         * 用 del_async 的话同一帧里的新页面 init 会看到 status_bar==NULL 而再建
+         * 一个, 旧对象要等下一帧才真正删除 —— 一帧内两个状态栏重叠。 */
+        lv_obj_del(status_bar); 
         
         status_bar = NULL;
         rtc_label_1 = NULL;

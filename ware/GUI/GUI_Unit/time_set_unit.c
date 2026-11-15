@@ -42,7 +42,15 @@ static void init_roller_options(void)
     opts_min_sec = (char *)malloc_ccm(256); 
 
     if (!opts_year || !opts_month || !opts_day || !opts_hour || !opts_min_sec) {
-        return; // 内存分配失败
+        /* 部分失败必须整体回滚: 不释放已成功的块也不置 opts_inited 的话,
+         * 下次进页会重新 malloc 一整套, 旧指针被覆盖 —— 每次进页最多漏 804B
+         * CCM(池共 62KB), 反复进出就能耗尽。 */
+        if (opts_year)    { free_ccm(opts_year);    opts_year    = NULL; }
+        if (opts_month)   { free_ccm(opts_month);   opts_month   = NULL; }
+        if (opts_day)     { free_ccm(opts_day);     opts_day     = NULL; }
+        if (opts_hour)    { free_ccm(opts_hour);    opts_hour    = NULL; }
+        if (opts_min_sec) { free_ccm(opts_min_sec); opts_min_sec = NULL; }
+        return;
     }
 
     int offset = 0;
