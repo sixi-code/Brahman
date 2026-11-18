@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="5PzxWTiGoHzNhPe9wdIfha">
+<head data-page-node-id="RUa612F1UHEfRkhzCqoLKv">
+<meta charset="utf-8" data-page-node-id="B75uot3GDNgTYFqHBfv9vD">
+<meta name="viewport" content="width=device-width,initial-scale=1" data-page-node-id="fSGeT1Z7eIffNbHJCEYaWA">
+<title>Brahman · UI 模拟器</title>
+<link rel="stylesheet" href="assets/css/style.css" data-page-node-id="aHvyB8EyCWiuIlCSGs2epM">
+</head>
+<body data-page-node-id="cAWpVcS5rTJwPsShvtPEE1">
+
+<div class="stage" data-page-node-id="8aLNdfFHOerfqI9nOBfThO">
+
+  <header class="stage-head" data-page-node-id="81x77TkPGTUxE1aFqfL37U">
+    <h1 data-page-node-id="Z7kQ35nzpKJv0ULuMKnJzw">Brahman UI 模拟器</h1>
+    <p data-page-node-id="fFxFWwCcnpzLCtGtc3XZvj">STM32F405RGT6 · 1.54″ IPS 240×240 · LVGL 8.2 · 依据固件 <code data-page-node-id="uhHc2EEOXSVvyBmwSzUjeV">GUI_Unit</code> / <code data-page-node-id="LPdxfNabp2fnHd10IB7ydv">GUI_Page</code> 1:1 复刻</p>
+    <span class="tag" data-page-node-id="wKs2MrXgw7ijEhfsiBfoKU">图标位图取自 GUI_Icons/*.c</span>
+  </header>
+
+  <div class="stage-main" data-page-node-id="HLFukPh2fGN4uy4rgGSJau">
+
+    <!-- ============ 机身 ============ -->
+    <div class="device" data-page-node-id="Pu7AGEvr9AF8ehQgbZfzop">
+      <div class="device-top" data-page-node-id="e1Gm52HZ9fHUieQoPG2vW3">
+        <span class="led" data-page-node-id="QhRfqjh6NJy9b0YrhsJ9ru"></span>
+        <span class="brand" data-page-node-id="pSl2ba5B869avsixGsKlke">BRAHMAN</span>
+        <span class="grille" data-page-node-id="PfUlayCR9elyCFYqptLwjo"><i data-page-node-id="MoB3Dk1UTEsDaFKaOmd1j3"></i><i data-page-node-id="gZAhIMhihW7HMq8t4OUaBC"></i><i data-page-node-id="ysLPjpcPYh1dVeKpfNtvNH"></i><i data-page-node-id="dUqaPgKi8uOhGpmQ6zO7Z2"></i><i data-page-node-id="vXFC1FdLU4jnJAsL1ywYfi"></i><i data-page-node-id="NGHOfUK7CMDEpFiwzcVFkL"></i></span>
+        <span class="jack" title="3.5mm 耳机孔" data-page-node-id="w3VqwerMmSH2cxlkkENclJ"></span>
+      </div>
+
+      <div class="screen-bezel" data-page-node-id="Yhqe2pjAo9CJDDOSrbS7eU">
+        <div class="screen-viewport" data-page-node-id="IcAephFVPuguUbdpwQqpcj">
+          <div class="screen" id="screen" data-page-node-id="s1iHkFjuEQ6sCWacBXXUut">
+            <div class="layer" id="layer-page" data-page-node-id="ebP8nqJP9Z3Tth7MMnFEGW"></div>
+            <div class="layer" id="layer-nav" data-page-node-id="wH838vE0MDwh1xGLGptfrH"></div>
+            <div class="layer" id="layer-status" data-page-node-id="lXjgQzy399N0CKGUpwdBiI"></div>
+            <div class="layer" id="layer-overlay" data-page-node-id="cvesn0KGXpfqdqnguDsGQZ"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="device-bottom" data-page-node-id="uWwm9nfXhZsagl4wnmWoAS">
+        <div class="stick" id="stick-l" title="左摇杆 PB0/PB1 + 中键 PB2" data-page-node-id="uMhZhsAPVKRJVnRPKcUgGv"><span data-page-node-id="jyoPC05YjS6Y74Z5h0glB0"></span></div>
+        <button class="btn-wkup" id="btn-wkup" title="顶部唤醒键 PA0（返回）" data-page-node-id="7U2fa7s3zwsx3u4q2epesg">WKUP</button>
+        <div class="stick" id="stick-r" title="右摇杆 PC0/PC1 + 中键 PC2" data-page-node-id="1Wru3fgNWq5QVwBspcGMgD"><span data-page-node-id="5Nsl1zp1GW2OdWgBCFT638"></span></div>
+      </div>
+    </div>
+
+    <!-- ============ 侧栏 ============ -->
+    <aside class="panel" data-page-node-id="qjk3m0uP9WuOFRAcHqdvOK">
+      <div class="panel-block" data-page-node-id="JB0iSadgDdu9YNwmKQpcPE">
+        <h2 data-page-node-id="9jHKr0vcA0ndtxelntgy1I">页面直达</h2>
+        <div class="page-list" id="page-list" data-page-node-id="lF5o4aFIQbhZhgvuaoaGZR"></div>
+      </div>
+
+      <div class="panel-block" data-page-node-id="YXzw9YGBWQkT8NQuWsgWya">
+        <h2 data-page-node-id="yrDTVSJ58JvdzwxYp8XIBP">当前状态</h2>
+        <dl class="meta" id="meta" data-page-node-id="Dlm08ZkUlV2Jb3sRQpPEeE"></dl>
+      </div>
+
+      <div class="panel-block" data-page-node-id="54mWXmFqZLhP23CjniKTSS">
+        <h2 data-page-node-id="6prsCa8g4ympvA9NtklgJA">操作方式</h2>
+        <p class="hint" data-page-node-id="5ru9w75mxNz6q7BXiRHKbK">
+          · 点击屏幕上的图标进入应用，<b data-page-node-id="STe1bBEyMtXPP6WHLDJ3ly">导航栏左上角</b>返回、右上角两个按钮回桌面<br data-page-node-id="aE0UBMCsrPtckeGCewekKL">
+          · <b data-page-node-id="zpumtl5BO0eHTdstXS3RD8">状态栏</b>（底部）：左侧切电量/电压，中间开控制中心，右侧切 24h / 12h / CPU<br data-page-node-id="Wa0HWwll5DWn6sLu4c6s3k">
+          · <b data-page-node-id="hJWiIlgBQ1N1uZVMoWmgbH">音乐页</b>：点封面或频谱条切歌词，拖动进度条跳转<br data-page-node-id="gtA5ktx0wBsfRlmrKsHo8k">
+          · <b data-page-node-id="0H11GTGG9PIlaeVuRMlClF">桌面</b>：左右拖动或按 <kbd data-page-node-id="lg78HyYUmjjudiFOFozxvH">←</kbd> <kbd data-page-node-id="ZcEFUlkkA2D3eqGKCKhg8F">→</kbd> 翻页<br data-page-node-id="5qq2ASxYJ4JOdCDo7R30PK">
+          · <b>记事本</b>：列表翻页 / 点条目编辑 / 新建；有未保存改动时点「列表」或导航栏返回会先弹 保存 / 不保存 / 取消<br>
+          · <b>开机页</b>：拖动<b>左摇杆</b>移动光标，角色立绘随之漂移（固件 <code>start_unit</code> 的视差动效）<br>
+          · 快捷键：<kbd data-page-node-id="UqBHCo00z3X4OxA83X4wfi">Esc</kbd> 返回，<kbd data-page-node-id="4waxt5YZt7AjE1nw5Wnc1D">Enter</kbd> 控制中心
+        </p>
+      </div>
+    </aside>
+
+  </div>
+</div>
+
+<script src="assets/js/pages.js"></script>
+<script src="assets/js/app.js"></script>
+</body>
+</html>

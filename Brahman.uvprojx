@@ -317,7 +317,7 @@
             <uThumb>0</uThumb>
             <uSurpInc>0</uSurpInc>
             <uC99>1</uC99>
-            <uGnu>1</uGnu>
+            <uGnu>0</uGnu>
             <useXO>0</useXO>
             <v6Lang>1</v6Lang>
             <v6LangP>1</v6LangP>
@@ -327,7 +327,7 @@
             <v6WtE>0</v6WtE>
             <v6Rtti>0</v6Rtti>
             <VariousControls>
-              <MiscControls/>
+              <MiscControls>--diag_suppress=1 --diag_suppress=1295 --no-multibyte-chars</MiscControls>
               <Define>STM32F40_41xxx,USE_STDPERIPH_DRIVER,STM32F405xx,LV_LVGL_H_INCLUDE_SIMPLE,__FPU_USED,__FPU_PRESENT,ARM_MATH_CM4,__CC_ARM,ARM_MATH_MATRIX_CHECK,ARM_MATH_ROUNDING</Define>
               <Undefine/>
               <IncludePath>.;library;main;start;ware\lib\FreeRTOS;.cmsis\include;ware\BSP;ware\tool;ware\lib\TLSF;ware\lib\Fatfs;ware\lib\FlashDB;ware\Tasks;ware\GUI\GUI_Page;ware\APP\Music;ware\lib\LVGL\bsp;ware\lib\LVGL\core;ware\lib\LVGL\draw;ware\lib\LVGL\extra;ware\lib\LVGL\font;ware\lib\LVGL\gpu;ware\lib\LVGL\hal;ware\lib\LVGL\misc;ware\lib\LVGL\widgets;ware\GUI\GUI_Unit;ware\APP\Media;ware\lib\PNGdec;ware\lib\Tjpgd;ware\lib\AnimatedGIF;ware\lib\Music;ware\lib\Music\AAC;ware\lib\Music\APE;ware\lib\Music\FLAC;ware\lib\Music\MP3;ware\lib\Music\OGG;ware\APP\Text;ware\APP\USB;ware\APP\NES;ware\APP\NES\mapper;ware\lib\Cherry_USB\core;ware\lib\Cherry_USB\common;ware\lib\Cherry_USB\class\audio;ware\lib\Cherry_USB\class\cdc;ware\lib\Cherry_USB\class\gamepad;ware\lib\Cherry_USB\class\hid;ware\lib\Cherry_USB\class\hub;ware\lib\Cherry_USB\class\msc;ware\lib\Cherry_USB\class\serial;ware\lib\Cherry_USB\class\vendor\display;ware\lib\Letter_Shell</IncludePath>
